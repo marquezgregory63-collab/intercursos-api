@@ -1,16 +1,14 @@
-FROM php:8.2-apache
+# Usamos una imagen de PHP con un servidor integrado (PHP-CLI)
+FROM php:8.2-cli
 
-# Instalamos las dependencias de MySQL
+# Instalamos las extensiones necesarias
 RUN docker-php-ext-install pdo pdo_mysql
 
-# Esto elimina la configuración de Apache que causa el choque de MPM
-RUN rm -rf /etc/apache2/mods-enabled/mpm_*.load
-
-# Esto habilita solo el módulo necesario (prefork)
-RUN a2enmod mpm_prefork
-
 # Copiamos tus archivos
-COPY . /var/www/html/
+COPY . /usr/src/myapp
 
-# Ajustamos permisos
-RUN chown -R www-data:www-data /var/www/html
+# Nos movemos a esa carpeta
+WORKDIR /usr/src/myapp
+
+# Iniciamos el servidor interno de PHP directamente en el puerto que Railway asigna
+CMD php -S 0.0.0.0:${PORT}
