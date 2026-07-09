@@ -1,13 +1,9 @@
-FROM php:8.2-apache
+FROM trafex/php-nginx:latest
 
-# Instalamos extensiones necesarias
-RUN docker-php-ext-install pdo pdo_mysql
+# Instalar las extensiones de MySQL que necesitas
+USER root
+RUN apk add --no-cache php82-pdo_mysql php82-mysqli
+USER nobody
 
-# Deshabilitamos los módulos conflictivos de MPM de una vez
-RUN a2dismod mpm_event mpm_worker && a2enmod mpm_prefork
-
-# Copiamos tus archivos
-COPY . /var/www/html/
-
-# Damos permisos
-RUN chown -R www-data:www-data /var/www/html
+# Copiar tus archivos al directorio que usa esta imagen
+COPY --chown=nobody . /var/www/html/
