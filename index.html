@@ -8,7 +8,7 @@
 <script>
   // ── API PHP (InfinityFree) — Servidor en la nube ──────────────────────
   // Apunta directamente al dominio eterno del hosting en internet
-  const API = '';
+  const API = `${window.location.protocol}//${window.location.hostname}/intercursos-api`;
 
   async function apiFetch(endpoint, opts = {}) {
     const res = await fetch(`${API}/${endpoint}`, {
@@ -260,6 +260,14 @@
     initMiniManualListener();
     checkAutoManual();
   }
+
+  // ── EXPORTAR PDF ─────────────────────────────────────────
+  window.exportarPDF = function(){
+    var cedula = APP.session ? APP.session.cedula : '';
+    var url = API + '/exportar_pdf.php?cedula=' + encodeURIComponent(cedula);
+    window.open(url, '_blank');
+    toast('Abriendo reporte... usa Ctrl+P para guardar como PDF', 'success');
+  };
 
   function handleLogout(){
     stopPolling();
@@ -1968,6 +1976,9 @@ table.standings td:nth-child(2){text-align:left;padding-left:12px;font-weight:70
       <div class="nav-label">SISTEMA</div>
       <button class="nav-item" data-section="roles">
         <span class="nav-icon">🛡️</span> Gestionar Roles
+      </button>
+      <button class="nav-item" onclick="exportarPDF()" style="color:#10B981">
+        <span class="nav-icon">📄</span> Exportar PDF
       </button>
     </nav>
 
