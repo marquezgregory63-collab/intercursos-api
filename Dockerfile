@@ -1,18 +1,14 @@
 FROM php:8.2-apache
 
-# Habilitar mod_rewrite (necesario para que las rutas funcionen)
-RUN a2enmod rewrite
-
-# Instalar dependencias para MySQL
+# Instalamos extensiones para MySQL
 RUN docker-php-ext-install pdo pdo_mysql
 
-# Copiar todo el código al directorio de Apache
+# Copiamos tus archivos
 COPY . /var/www/html/
 
-# Dar permisos al usuario de Apache
+# Ajustamos permisos básicos
 RUN chown -R www-data:www-data /var/www/html
 
-# Configurar Apache para que escuche en el puerto que Railway le asigne
-RUN sed -i 's/80/${PORT}/g' /etc/apache2/sites-available/000-default.conf /etc/apache2/ports.conf
-
-EXPOSE ${PORT}
+# EXPOSE no es estrictamente necesario en Railway, 
+# pero ayuda a documentar. Apache por defecto escucha en 80.
+EXPOSE 80
