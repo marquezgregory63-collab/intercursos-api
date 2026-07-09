@@ -1,16 +1,16 @@
-FROM trafex/php-nginx:latest
+FROM php:8.2-apache
 
-# Cambiamos a root para poder instalar cosas
-USER root
+# Instalamos las dependencias de MySQL
+RUN docker-php-ext-install pdo pdo_mysql
 
-# Instalamos las extensiones necesarias con los nombres correctos para Alpine
-RUN apk add --no-cache php82-pdo_mysql php82-mysqli
+# Esto elimina la configuración de Apache que causa el choque de MPM
+RUN rm -rf /etc/apache2/mods-enabled/mpm_*.load
 
-# Si el comando anterior falla de nuevo, usaremos esta línea más genérica:
-# RUN apk add --no-cache php82-pecl-mysqlnd 
+# Esto habilita solo el módulo necesario (prefork)
+RUN a2enmod mpm_prefork
 
-# Volvemos al usuario nobody (importante para la seguridad de esta imagen)
-USER nobody
+# Copiamos tus archivos
+COPY . /var/www/html/
 
-# Copiar tus archivos
-COPY --chown=nobody . /var/www/html/
+# Ajustamos permisos
+RUN chown -R www-data:www-data /var/www/html
