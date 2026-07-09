@@ -1,15 +1,13 @@
 FROM php:8.2-apache
 
-# Instalamos las extensiones de MySQL
+# Instalamos extensiones necesarias
 RUN docker-php-ext-install pdo pdo_mysql
 
-# Copiamos nuestra configuración de Apache para evitar errores de MPM
-COPY 000-default.conf /etc/apache2/sites-available/000-default.conf
+# Deshabilitamos los módulos conflictivos de MPM de una vez
+RUN a2dismod mpm_event mpm_worker && a2enmod mpm_prefork
 
-# Copiamos todos tus archivos del proyecto
+# Copiamos tus archivos
 COPY . /var/www/html/
 
-# Ajustamos los permisos
+# Damos permisos
 RUN chown -R www-data:www-data /var/www/html
-
-EXPOSE 80
