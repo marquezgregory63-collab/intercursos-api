@@ -1,0 +1,9 @@
+# Desactivar el filtro de seguridad de InfinityFree para la API
+AlternativeWebmasterOM: 1
+
+<IfModule mod_rewrite.c>
+    RewriteEngine On
+    Header set Access-Control-Allow-Origin "*"
+    Header set Access-Control-Allow-Headers "Content-Type, Authorization, X-Requested-With"
+    Header set Access-Control-Allow-Methods "GET, POST, OPTIONS, PUT, DELETE"
+</IfModule>

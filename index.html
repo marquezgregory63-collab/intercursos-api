@@ -1,0 +1,2390 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+<title>Intercursos JRG — Dashboard</title>
+
+<script>
+  // ── API PHP (InfinityFree) — Servidor en la nube ──────────────────────
+  // Apunta directamente al dominio eterno del hosting en internet
+  const API = 'http://intercursos-jrg2026.great-site.net/intercursos-api';
+
+  async function apiFetch(endpoint, opts = {}) {
+    const res = await fetch(`${API}/${endpoint}`, {
+      headers: { 'Content-Type': 'application/json' },
+      ...opts,
+    });
+    const text = await res.text();
+    try {
+      return JSON.parse(text);
+    } catch(e) {
+      // El PHP devolvió HTML (error de PHP) en vez de JSON
+      // Extraemos el mensaje útil del HTML si existe
+      const match = text.match(/<b>(.+?)<\/b>/);
+      const phpMsg = match ? match[1] : text.substring(0, 200);
+      throw new Error(`PHP Error en ${endpoint}: ${phpMsg}`);
+    }
+  }
+  // ── HELPERS ──────────────────────────────────────────────────
+  const normDisc = d => (d||'').toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g,"");
+
+  const MAPA_ABR = { "ADM":"Administración","TEL":"Telemática","CONT":"Contabilidad","TUR":"Turismo" };
+  const MAPA_NUM = { "1":"1ER","2":"2DO","3":"3ER","4":"4TO","5":"5TO" };
+  const idToNombre = id => {
+    if(!id) return "Sin nombre";
+    const [n,m,s] = id.split("-");
+    return `${MAPA_NUM[n]||n} ${m} ${s}`;
+  };
+
+  const generarIdEquipo = (ano,mencion,seccion) => {
+    const mapa={"1er Año":"1","2do Año":"2","3er Año":"3","4to Año":"4","5to Año":"5"};
+    const abr = mencion==="Administración"?"ADM":mencion==="Telemática"?"TEL":mencion==="Contabilidad"?"CONT":"TUR";
+    return `${mapa[ano]||ano.split(' ')[0]}-${abr}-${seccion}`;
+  };
+  const abreviarEquipo = (ano,mencion,seccion) => {
+    const n = ano.split(' ')[0].toUpperCase();
+    const m = mencion==="Administración"?"ADM":mencion==="Telemática"?"TEL":mencion==="Contabilidad"?"CONT":"TUR";
+    return `${n} ${m} ${seccion}`;
+  };
+
+  // ═══════════════════════════════════════════════════
+  //  ESTADO GLOBAL
+  // ═══════════════════════════════════════════════════
+  window.APP = {
+    normDisc, idToNombre, generarIdEquipo, abreviarEquipo,
+    MAPA_ABR,
+    session: null,
+    disc: 'Fútbol',
+    partidos: [],
+    posiciones: [],
+    mayorAnotador: null,
+    pollTimer: null,
+    matchTimer: null,
+  };
+
+  window.addEventListener('DOMContentLoaded', initApp);
+
+  // ══════════════════════════════════════════════════
+  //  INIT
+  // ══════════════════════════════════════════════════
+  function initApp(){
+    showScreen('login');
+    document.getElementById('btn-login').addEventListener('click', handleLogin);
+    document.getElementById('btn-recover').addEventListener('click', () => showScreen('recover'));
+    document.getElementById('btn-back-login').addEventListener('click', () => showScreen('login'));
+    document.getElementById('btn-send-code').addEventListener('click', handleSendCode);
+    document.getElementById('btn-verify-code').addEventListener('click', handleVerifyCode);
+    document.getElementById('btn-back-recover').addEventListener('click', ()=>{ recoverStep(1); showScreen('login'); });
+    document.getElementById('btn-logout').addEventListener('click', handleLogout);
+    document.querySelectorAll('.nav-item').forEach(el=>{
+      el.addEventListener('click',()=>{
+        activateSection(el.dataset.section);
+        closeMobileSidebar();
+      });
+    });
+    document.querySelectorAll('.disc-pill').forEach(el=>{
+      el.addEventListener('click',()=> changeDisciplina(el.dataset.disc));
+    });
+    // Admin tab buttons
+    document.querySelectorAll('.admin-tab').forEach(el=>{
+      el.addEventListener('click',()=>activateAdminTab(el.dataset.tab));
+    });
+    document.getElementById('btn-publish-match').addEventListener('click', publicarPartido);
+    // Aviso en tiempo real si elige sábado o domingo
+    document.getElementById('np-fecha').addEventListener('change', function(){
+      if(!this.value) return;
+      const d = new Date(`${this.value}T12:00:00`).getDay();
+      if(d===0||d===6){
+        toast('Esa fecha es fin de semana, elige lunes a viernes','error');
+      }
+    });
+    document.getElementById('btn-register-student').addEventListener('click', registrarEstudiante);
+    document.getElementById('btn-go-register').addEventListener('click', () => showScreen('register'));
+    document.getElementById('btn-back-from-register').addEventListener('click', () => showScreen('login'));
+    document.getElementById('btn-create-account').addEventListener('click', handleRegistro);
+
+    // Menú móvil (sidebar tipo drawer)
+    document.getElementById('hamburger-btn').addEventListener('click', openMobileSidebar);
+    document.getElementById('sidebar-close-btn').addEventListener('click', closeMobileSidebar);
+    document.getElementById('sidebar-overlay').addEventListener('click', closeMobileSidebar);
+    // Tipo doc toggle register
+    document.querySelectorAll('.reg-tipo-btn').forEach(btn => {
+      btn.addEventListener('click', () => {
+        document.querySelectorAll('.reg-tipo-btn').forEach(b => b.classList.remove('active'));
+        btn.classList.add('active');
+        const tipo = btn.dataset.tipo;
+        const maxLen = tipo === 'V' ? 8 : 9;
+        const ph     = tipo === 'V' ? '7 u 8 dígitos' : '6 a 9 dígitos';
+        document.getElementById('reg-cedula').maxLength = maxLen;
+        document.getElementById('reg-cedula').placeholder = ph;
+      });
+    });
+    // Real-time password filter: only letters, numbers, dots
+    ['reg-pass','reg-pass-confirm'].forEach(id => {
+      document.getElementById(id).addEventListener('input', function() {
+        const cur = this.selectionStart;
+        this.value = this.value.replace(/[^a-zA-Z0-9.]/g, '');
+        this.setSelectionRange(cur, cur);
+      });
+    });
+    // Real-time name filter: only letters
+    ['reg-nombre','reg-apellido'].forEach(id => {
+      document.getElementById(id).addEventListener('input', function() {
+        const cur = this.selectionStart;
+        this.value = this.value.replace(/[^a-zA-ZáéíóúÁÉÍÓÚàèìòùÀÈÌÒÙñÑüÜ\s]/g, '').toUpperCase();
+        this.setSelectionRange(cur, cur);
+      });
+    });
+    // Real-time cedula filter: only numbers
+    document.getElementById('reg-cedula').addEventListener('input', function() {
+      const cur = this.selectionStart;
+      this.value = this.value.replace(/[^0-9]/g, '');
+      this.setSelectionRange(cur, cur);
+    });
+
+    // ── Admin Panel: Agregar Estudiante — mismos filtros en tiempo real ──
+    ['est-nombre','est-apellido'].forEach(id => {
+      document.getElementById(id).addEventListener('input', function() {
+        const cur = this.selectionStart;
+        this.value = this.value.replace(/[^a-zA-ZáéíóúÁÉÍÓÚàèìòùÀÈÌÒÙñÑüÜ\s]/g, '').toUpperCase();
+        this.setSelectionRange(cur, cur);
+      });
+    });
+    document.getElementById('est-cedula').addEventListener('input', function() {
+      const cur = this.selectionStart;
+      this.value = this.value.replace(/[^0-9]/g, '');
+      this.setSelectionRange(cur, cur);
+    });
+  }
+
+  // ══════════════════════════════════════════════════
+  //  SCREENS
+  // ══════════════════════════════════════════════════
+  function showScreen(name){
+    document.querySelectorAll('.screen').forEach(s=>s.classList.remove('active'));
+    document.getElementById(`screen-${name}`).classList.add('active');
+  }
+
+  // ══════════════════════════════════════════════════
+  //  LOGIN
+  // ══════════════════════════════════════════════════
+  async function handleLogin(){
+    const tipo = document.getElementById('login-tipo').value;
+    const num  = document.getElementById('login-cedula').value.trim();
+    const pass = document.getElementById('login-pass').value;
+    const cedula = `${tipo}${num}`;
+    if(!num||!pass){ toast('Completa todos los campos','error'); return; }
+    setLoginLoading(true);
+    try{
+      const data = await apiFetch('login.php', {
+        method: 'POST',
+        body: JSON.stringify({ cedula, password: pass }),
+      });
+      if(data.error){ toast(data.error,'error'); return; }
+      if(!data.uid){ toast('Error de acceso','error'); return; }
+      APP.session = { cedula: data.cedula, nombre: data.nombre, rol: data.rol };
+      bootDashboard();
+    }catch(e){ toast('Error de conexión con el servidor','error'); }
+    finally{ setLoginLoading(false); }
+  }
+
+  function setLoginLoading(v){
+    const btn = document.getElementById('btn-login');
+    btn.disabled=v;
+    btn.textContent = v?'Conectando…':'ACCEDER';
+  }
+
+  // ══════════════════════════════════════════════════
+  //  RECOVER
+  // ══════════════════════════════════════════════════
+  let _recoverCode=null, _recoverData=null;
+
+  async function handleSendCode(){
+    const email = document.getElementById('recover-email').value.trim().toLowerCase();
+    if(!email){ toast('Ingresa tu correo','error'); return; }
+    document.getElementById('btn-send-code').disabled=true;
+    document.getElementById('btn-send-code').textContent='Enviando…';
+    try{
+      const data = await apiFetch('recuperar.php', {
+        method: 'POST',
+        body: JSON.stringify({ email }),
+      });
+      if(!data.ok){ toast(data.msg||'Correo no registrado','error'); return; }
+      _recoverData = data;
+      _recoverCode = Math.floor(100000+Math.random()*900000).toString();
+      // EmailJS sigue igual (cliente-side)
+      await emailjs.send('service_pnugtot','template_fbsdydv',
+        { to_email:email, codigo:_recoverCode, name:data.nombre||'Usuario' },'Etf12-NaSwAtvUKCA');
+      toast('Código enviado a '+email,'success');
+      recoverStep(2);
+    }catch(e){ toast('No se pudo enviar el correo','error'); }
+    finally{
+      document.getElementById('btn-send-code').disabled=false;
+      document.getElementById('btn-send-code').textContent='ENVIAR CÓDIGO';
+    }
+  }
+
+  function handleVerifyCode(){
+    const cod = document.getElementById('recover-code').value.trim();
+    if(cod===_recoverCode){
+      document.getElementById('rec-username').textContent = _recoverData.nombre||'';
+      document.getElementById('rec-cedula').textContent   = _recoverData.cedula||'';
+      document.getElementById('rec-pass').textContent     = _recoverData.password||'';
+      recoverStep(3);
+    } else { toast('Código incorrecto','error'); }
+  }
+
+  function recoverStep(n){
+    document.querySelectorAll('.recover-step').forEach(s=>s.classList.remove('active'));
+    const el = document.getElementById(`recover-step-${n}`);
+    if(el) el.classList.add('active');
+  }
+
+  // ══════════════════════════════════════════════════
+  //  DASHBOARD BOOT
+  // ══════════════════════════════════════════════════
+  function bootDashboard(){
+    document.getElementById('header-name').textContent = APP.session.nombre;
+    document.getElementById('header-cedula').textContent = APP.session.cedula;
+    const adminNav = document.getElementById('nav-admin');
+    if(APP.session.rol==='admin'||APP.session.rol==='arbitro') adminNav.style.display='flex';
+    else adminNav.style.display='none';
+    const rolesNav = document.getElementById('nav-roles');
+    if(rolesNav) rolesNav.style.display = APP.session.rol==='admin' ? 'flex' : 'none';
+    showScreen('dashboard');
+    activateSection('inicio');
+    startPolling();
+    APP.matchTimer = setInterval(updateLiveMinutes, 60000);
+    initManualListener();
+    initMiniManualListener();
+    checkAutoManual();
+  }
+
+  function handleLogout(){
+    stopPolling();
+    if(APP.matchTimer) clearInterval(APP.matchTimer);
+    APP.session=null;
+    APP.partidos=[]; APP.posiciones=[]; APP.mayorAnotador=null;
+    showScreen('login');
+    document.getElementById('login-cedula').value='';
+    document.getElementById('login-pass').value='';
+  }
+
+  // ── POLLING cada 5s (reemplaza onSnapshot) ────────────────────
+  function startPolling(){
+    stopPolling();
+    fetchData();
+    APP.pollTimer = setInterval(fetchData, 5000);
+  }
+  function stopPolling(){
+    if(APP.pollTimer){ clearInterval(APP.pollTimer); APP.pollTimer=null; }
+  }
+
+  async function fetchData(){
+    const discId = normDisc(APP.disc);
+    try{
+      const [rPart, rPos, rAnot] = await Promise.all([
+        apiFetch(`partidos_get.php?disciplinaId=${discId}`),
+        apiFetch(`posiciones_get.php?disciplinaId=${discId}`),
+        apiFetch(`anotador_get.php?disciplina=${encodeURIComponent(APP.disc)}`),
+      ]);
+
+      // FIX: aceptar respuesta con ok:true O con array directo en data
+      // (por si el PHP devuelve {ok:true,data:[]} o {data:[]} o directamente [])
+      const partData = rPart.ok ? rPart.data :
+                       Array.isArray(rPart.data) ? rPart.data :
+                       Array.isArray(rPart) ? rPart : null;
+
+      const posData  = rPos.ok  ? rPos.data  :
+                       Array.isArray(rPos.data)  ? rPos.data  :
+                       Array.isArray(rPos)  ? rPos  : null;
+
+      const anotData = rAnot.ok ? rAnot.data :
+                       rAnot.data ? rAnot.data : null;
+
+      if(partData !== null){
+        APP.partidos = partData;
+        APP.partidos.sort((a,b)=>new Date(b.fecha_creacion)-new Date(a.fecha_creacion));
+        renderPartidos();
+        if(document.getElementById('page-nomina').classList.contains('active')) renderNominaPage();
+      } else {
+        // Mostrar el error real en los contenedores en lugar de quedarse en "Cargando..."
+        const errMsg = rPart.error || rPart.msg || 'Error al cargar partidos';
+        document.getElementById('live-container').innerHTML   = `<p class="no-data" style="color:#EF4444">Error: ${errMsg}</p>`;
+        document.getElementById('prox-container').innerHTML   = `<p class="no-data" style="color:#EF4444">Error: ${errMsg}</p>`;
+        document.getElementById('result-container').innerHTML = `<p class="no-data" style="color:#EF4444">Error: ${errMsg}</p>`;
+      }
+
+      if(posData !== null){
+        APP.posiciones = posData;
+        renderPosiciones();
+      } else {
+        const errPos = rPos.error || rPos.msg || 'Error al cargar posiciones';
+        document.getElementById('tabla-posiciones').innerHTML = `<tr><td colspan="10" class="no-data" style="color:#EF4444">Error: ${errPos}</td></tr>`;
+      }
+
+      if(anotData !== null){
+        APP.mayorAnotador = anotData;
+        renderMayorAnotador();
+      }
+
+    }catch(e){
+      // Mostrar error de red real
+      const msg = e.message || 'No se pudo conectar con el servidor';
+      document.getElementById('live-container').innerHTML   = `<p class="no-data" style="color:#EF4444">Sin conexión: ${msg}</p>`;
+      document.getElementById('prox-container').innerHTML   = `<p class="no-data" style="color:#EF4444">Sin conexión: ${msg}</p>`;
+      document.getElementById('result-container').innerHTML = `<p class="no-data" style="color:#EF4444">Sin conexión: ${msg}</p>`;
+      document.getElementById('tabla-posiciones').innerHTML = `<tr><td colspan="10" class="no-data" style="color:#EF4444">Sin conexión: ${msg}</td></tr>`;
+    }
+  }
+
+  function changeDisciplina(disc){
+    APP.disc=disc;
+    document.querySelectorAll('.disc-pill').forEach(p=>{
+      p.classList.toggle('active', p.dataset.disc===disc);
+    });
+    startPolling();
+    renderNominaPage();
+  }
+
+  // ══════════════════════════════════════════════════
+  //  MENÚ MÓVIL (SIDEBAR DRAWER)
+  // ══════════════════════════════════════════════════
+  function openMobileSidebar(){
+    document.getElementById('sidebar').classList.add('open');
+    document.getElementById('sidebar-overlay').classList.add('active');
+  }
+  function closeMobileSidebar(){
+    document.getElementById('sidebar').classList.remove('open');
+    document.getElementById('sidebar-overlay').classList.remove('active');
+  }
+
+  // ══════════════════════════════════════════════════
+  //  NAVIGATION
+  // ══════════════════════════════════════════════════
+  function activateSection(name){
+    document.querySelectorAll('.nav-item').forEach(n=>n.classList.toggle('active',n.dataset.section===name));
+    document.querySelectorAll('.section-page').forEach(p=>p.classList.toggle('active',p.id==='page-'+name));
+    if(name==='nomina') renderNominaPage();
+    if(name==='admin')  renderAdminPage();
+    if(name==='roles')  renderRolesPage();
+    checkSectionManual(name);
+  }
+
+  // ══════════════════════════════════════════════════
+  //  RENDER INICIO
+  // ══════════════════════════════════════════════════
+  function renderPartidos(){
+    const live   = APP.partidos.filter(p=>['en vivo','en curso'].includes(String(p.estado_tiempo||'').toLowerCase().trim()));
+    const prox   = APP.partidos.filter(p=>['programado','pendiente'].includes(String(p.estado_tiempo||'').toLowerCase().trim()));
+    const result = APP.partidos.filter(p=>['finalizado','terminado'].includes(String(p.estado_tiempo||'').toLowerCase().trim()));
+
+    renderLive(live);
+    renderProximos(prox);
+    renderResultados(result);
+  }
+
+  function renderLive(list){
+    const el = document.getElementById('live-container');
+    const badge = document.getElementById('live-badge');
+    if(!list.length){ el.innerHTML='<p class="no-data">No hay partidos en vivo ahora</p>'; badge.style.display='none'; return; }
+    badge.style.display='inline-flex';
+    badge.textContent=list.length;
+    el.innerHTML=list.map(p=>`
+      <div class="match-card live-card" onclick="openStatsModal('${p.id}')">
+        <div class="live-indicator"><span class="red-dot"></span>EN VIVO · ${calcMin(p.inicio_real_ms)}</div>
+        <div class="match-row">
+          <div class="team-col"><span class="team-name">${p.equipoLocal||p.equipo1||'Local'}</span></div>
+          <div class="score-col"><span class="score live-score">${p.goles1??0} – ${p.goles2??0}</span></div>
+          <div class="team-col"><span class="team-name">${p.equipoVisita||p.equipo2||'Visita'}</span></div>
+        </div>
+        <div class="match-meta"><span>📍 ${p.ubicacion||''}</span></div>
+      </div>`).join('');
+  }
+
+  function renderProximos(list){
+    const el = document.getElementById('prox-container');
+    if(!list.length){ el.innerHTML='<p class="no-data">No hay partidos programados</p>'; return; }
+    el.innerHTML=list.map(p=>`
+      <div class="match-card">
+        <div class="match-row">
+          <div class="team-col"><span class="team-name">${p.equipoLocal||'Local'}</span></div>
+          <div class="score-col"><span class="vs-badge">VS</span></div>
+          <div class="team-col"><span class="team-name">${p.equipoVisita||'Visita'}</span></div>
+        </div>
+        <div class="match-meta"><span>📅 ${p.programacion||'—'}</span><span>📍 ${p.ubicacion||''}</span></div>
+      </div>`).join('');
+  }
+
+  function renderResultados(list){
+    const el = document.getElementById('result-container');
+    if(!list.length){ el.innerHTML='<p class="no-data">Sin resultados registrados</p>'; return; }
+    el.innerHTML=list.map(p=>`
+      <div class="match-card" onclick="openStatsModal('${p.id}')">
+        <div class="match-row">
+          <div class="team-col"><span class="team-name">${p.equipoLocal||p.equipo1||'Local'}</span></div>
+          <div class="score-col"><span class="score result-score">${p.goles1??0} – ${p.goles2??0}</span></div>
+          <div class="team-col"><span class="team-name">${p.equipoVisita||p.equipo2||'Visita'}</span></div>
+        </div>
+        <div class="match-meta finalizado-tag">FINALIZADO</div>
+      </div>`).join('');
+  }
+
+  function renderPosiciones(){
+    const el=document.getElementById('tabla-posiciones');
+    const mostrarEmpate=APP.disc==='Fútbol';
+    if(!APP.posiciones.length){ el.innerHTML='<tr><td colspan="9" class="no-data">Sin datos para '+APP.disc+'</td></tr>'; return; }
+    el.innerHTML=APP.posiciones.map((t,i)=>{
+      const dg=(t.gf||0)-(t.gc||0);
+      const nombre=t.equipoNombre||idToNombre(t.idEquipo)||t.seccion||'Equipo';
+      return `<tr class="${i%2===0?'row-even':'row-odd'}">
+        <td class="rank ${i<3?'top3':''}">${i+1}</td>
+        <td class="team-cell">${nombre}</td>
+        <td>${t.pj||0}</td><td>${t.pg||0}</td>
+        ${mostrarEmpate?`<td>${t.pe||0}</td>`:''}
+        <td>${t.pp||0}</td><td>${t.gf||0}</td><td>${t.gc||0}</td>
+        <td>${dg>=0?'+':''}{dg}</td>
+        <td class="pts-cell">${t.puntos||0}</td>
+      </tr>`.replace('{dg}',dg);
+    }).join('');
+    // Update header
+    const pe_th=document.getElementById('th-pe');
+    if(pe_th) pe_th.style.display=mostrarEmpate?'':'none';
+  }
+
+  function renderMayorAnotador(){
+    const el=document.getElementById('mayor-anotador');
+    if(!APP.mayorAnotador){ el.style.display='none'; return; }
+    el.style.display='';
+    const ma=APP.mayorAnotador;
+    const disc=normDisc(APP.disc);
+    let badge='';
+    if(disc==='basket'){
+      badge=`🎯 TL:${ma.tl_totales||0}  🏀 2P:${ma.dobles_totales||0}  🔥 3P:${ma.triples_totales||0}`;
+    } else if(disc==='voleibol'){
+      badge=`⚡ Kill:${ma.kills_totales||0}  🎾 Ace:${ma.aces_totales||0}  🛡 Blq:${ma.bloqueos_totales||0}`;
+    } else {
+      const g=ma.goles_totales||ma.puntos_totales||0;
+      badge=`⚽ ${g} ${g===1?'GOL':'GOLES'}`;
+    }
+    const teamName=idToNombre(ma.idEquipo)||`${ma.ano||''} ${ma.mencion||''} ${ma.seccion||''}`.trim();
+    document.getElementById('ma-name').textContent=`${ma.nombre} ${ma.apellido||''}`;
+    document.getElementById('ma-team').textContent=teamName;
+    document.getElementById('ma-badge').textContent=badge;
+    document.getElementById('ma-pts').textContent=ma.puntos_totales||0;
+  }
+
+  function updateLiveMinutes(){
+    document.querySelectorAll('.live-min').forEach(el=>{
+      const ms=Number(el.dataset.ms);
+      el.textContent=calcMin(ms);
+    });
+  }
+
+  function calcMin(ms){
+    if(!ms) return "En vivo";
+    const diff=Math.floor((Date.now()-ms)/60000);
+    if(diff<0) return "0'";
+    return diff>90?"90'+":diff+"'";
+  }
+
+  // ══════════════════════════════════════════════════
+  //  NÓMINA
+  // ══════════════════════════════════════════════════
+  async function renderNominaPage(){
+    const el=document.getElementById('nomina-container');
+    el.innerHTML='<p class="no-data">Cargando…</p>';
+    try{
+      const discFiltro=normDisc(APP.disc);
+      const data = await apiFetch(`estudiantes.php?disciplinaId=${discFiltro}`);
+      if(!data.ok||!data.data.length){ el.innerHTML='<p class="no-data">Sin registros para '+APP.disc+'</p>'; return; }
+      const MAPA_NUM_ANO={"1":"1er Año","2":"2do Año","3":"3er Año","4":"4to Año","5":"5to Año"};
+      const grupos={};
+      data.data.forEach(d=>{
+        let ano=d.ano, mencion=d.mencion, seccion=d.seccion;
+        if((!ano||!mencion||!seccion)&&d.idEquipo){
+          const p=d.idEquipo.split('-');
+          ano=MAPA_NUM_ANO[p[0]]||p[0]||'Otros';
+          mencion=APP.MAPA_ABR[p[1]]||p[1]||'General';
+          seccion=p[2]||'';
+        }
+        ano=ano||'Otros'; mencion=mencion||'General';
+        const mk=`${mencion} ${seccion}`.trim();
+        if(!grupos[ano]) grupos[ano]={};
+        if(!grupos[ano][mk]) grupos[ano][mk]=[];
+        grupos[ano][mk].push(d);
+      });
+      if(!Object.keys(grupos).length){ el.innerHTML='<p class="no-data">Sin registros para '+APP.disc+'</p>'; return; }
+      const anoOrder=["1er Año","2do Año","3er Año","4to Año","5to Año"];
+      let html='';
+      anoOrder.forEach(ano=>{
+        if(!grupos[ano]) return;
+        html+=`<div class="nomina-ano"><h3 class="nomina-ano-title">${ano}</h3>`;
+        Object.entries(grupos[ano]).forEach(([mk,ests])=>{
+          html+=`<div class="nomina-grupo">
+            <div class="nomina-grupo-header">${mk} <span class="nomina-count">${ests.length} est.</span></div>
+            <table class="nomina-table">
+              <thead><tr><th>#</th><th>Nombre</th><th>Cédula</th><th>Pts</th></tr></thead>
+              <tbody>${ests.map((e,i)=>`
+                <tr>
+                  <td>${i+1}</td>
+                  <td>${e.nombre||''} ${e.apellido||''}</td>
+                  <td>${e.cedula||''}</td>
+                  <td class="pts-small">${e.puntos_totales||0}</td>
+                </tr>`).join('')}
+              </tbody>
+            </table>
+          </div>`;
+        });
+        html+='</div>';
+      });
+      el.innerHTML=html;
+    }catch(e){ el.innerHTML='<p class="no-data">Error cargando nómina</p>'; }
+  }
+
+  function renderNomina(){ if(document.getElementById('page-nomina').classList.contains('active')) renderNominaPage(); }
+
+  // ══════════════════════════════════════════════════
+  //  STATS MODAL
+  // ══════════════════════════════════════════════════
+  window.openStatsModal = async function(id){
+    const p=APP.partidos.find(x=>x.id==id);
+    if(!p) return;
+    const modal=document.getElementById('stats-modal');
+    const disc=p.disciplinaId||'futbol';
+    const s=p.stats||{};
+    const local=p.equipoLocal||p.equipo1||'Local';
+    const visita=p.equipoVisita||p.equipo2||'Visita';
+    const g1=p.goles1??0, g2=p.goles2??0;
+
+    let statsHTML='';
+    if(disc==='futbol'||!disc){
+      statsHTML=statRows([
+        {label:'POSESIÓN (%)', v1:s.pos1??50, v2:s.pos2??50},
+        {label:'REMATES',      v1:s.rem1??0,  v2:s.rem2??0},
+        {label:'CÓRNERS',      v1:s.cor1??0,  v2:s.cor2??0},
+        {label:'FALTAS',       v1:s.fal1??0,  v2:s.fal2??0},
+        {label:'AMARILLAS',    v1:s.ama1??0,  v2:s.ama2??0},
+        {label:'ROJAS',        v1:s.roj1??0,  v2:s.roj2??0},
+      ]);
+    } else if(disc==='basket'){
+      statsHTML=statRows([
+        {label:'ENCESTES (FGM)', v1:s.fgm1??0, v2:s.fgm2??0},
+        {label:'INTENTOS (FGA)', v1:s.fga1??0, v2:s.fga2??0},
+        {label:'TRIPLES (3PM)', v1:s.tp1??0,  v2:s.tp2??0},
+        {label:'LIBRES (FTM)',  v1:s.ftm1??0, v2:s.ftm2??0},
+        {label:'ASISTENCIAS',   v1:s.ast1??0, v2:s.ast2??0},
+        {label:'REBOTES OF.',   v1:s.oreb1??0,v2:s.oreb2??0},
+        {label:'REBOTES DEF.',  v1:s.dreb1??0,v2:s.dreb2??0},
+        {label:'ROBOS',         v1:s.stl1??0, v2:s.stl2??0},
+        {label:'TAPONES',       v1:s.blk1??0, v2:s.blk2??0},
+      ]);
+    } else {
+      statsHTML=statRows([
+        {label:'ACES',      v1:s.ace1??0,  v2:s.ace2??0},
+        {label:'KILLS',     v1:s.kill1??0, v2:s.kill2??0},
+        {label:'BLOQUEOS',  v1:s.blkp1??0, v2:s.blkp2??0},
+        {label:'DIGS',      v1:s.dig1??0,  v2:s.dig2??0},
+      ]);
+    }
+
+    // Timeline
+    let timelineHTML='<p class="no-data">Sin eventos registrados</p>';
+    if(p.historialPuntos?.length){
+      timelineHTML=p.historialPuntos.map(e=>`
+        <div class="timeline-event">
+          <div class="tl-min">${e.minuto||'—'}'</div>
+          <div class="tl-info">
+            <div class="tl-equipo">${e.equipo==1?'Equipo Local':'Equipo Visita'}</div>
+            <div class="tl-tipo">${e.tipoEvento||''} · ${e.anotador||'Sin nombre'}</div>
+          </div>
+        </div>`).join('');
+    }
+
+    document.getElementById('stats-modal-body').innerHTML=`
+      <div class="stats-header-card">
+        <div class="stats-team">${local}</div>
+        <div class="stats-score">${g1} – ${g2}</div>
+        <div class="stats-team">${visita}</div>
+      </div>
+      <div class="stats-disc-badge">${disc.toUpperCase()} · ${p.estado_tiempo||''}</div>
+      ${statsHTML?`<div class="stats-rows">${statsHTML}</div>`:''}
+      <div class="timeline-title">⚡ Cronología</div>
+      <div class="timeline-list">${timelineHTML}</div>
+    `;
+    modal.classList.add('active');
+  };
+
+  function statRows(rows){
+    return rows.map(r=>`
+      <div class="stat-row">
+        <span class="stat-val">${r.v1}</span>
+        <span class="stat-label">${r.label}</span>
+        <span class="stat-val">${r.v2}</span>
+      </div>`).join('');
+  }
+
+  document.addEventListener('DOMContentLoaded',()=>{
+    document.getElementById('stats-modal-close').addEventListener('click',()=>{
+      document.getElementById('stats-modal').classList.remove('active');
+    });
+    document.getElementById('stats-modal').addEventListener('click',e=>{
+      if(e.target===document.getElementById('stats-modal')) document.getElementById('stats-modal').classList.remove('active');
+    });
+  });
+
+  // ══════════════════════════════════════════════════
+  //  ADMIN
+  // ══════════════════════════════════════════════════
+  function renderAdminPage(){
+    activateAdminTab('partidos');
+    renderAdminPartidos();
+    const sysZone = document.getElementById('admin-sistema-zone');
+    if(sysZone) sysZone.style.display = APP.session?.rol==='admin' ? 'block' : 'none';
+  }
+
+  function activateAdminTab(tab){
+    document.querySelectorAll('.admin-tab').forEach(t=>t.classList.toggle('active',t.dataset.tab===tab));
+    document.querySelectorAll('.admin-tab-content').forEach(c=>c.classList.toggle('active',c.id==='atab-'+tab));
+    if(tab==='partidos') renderAdminPartidos();
+  }
+
+  function renderAdminPartidos(){
+    const el=document.getElementById('admin-partidos-list');
+    if(!el) return;
+    el.innerHTML='<p class="no-data">Cargando…</p>';
+    Promise.all([
+      apiFetch('partidos_get.php?disciplinaId=futbol'),
+      apiFetch('partidos_get.php?disciplinaId=basket'),
+      apiFetch('partidos_get.php?disciplinaId=voleibol'),
+    ]).then(([r1,r2,r3])=>{
+      const list=[...(r1.ok?r1.data:[]),...(r2.ok?r2.data:[]),...(r3.ok?r3.data:[])];
+      list.sort((a,b)=>new Date(b.fecha_creacion)-new Date(a.fecha_creacion));
+      if(!list.length){ el.innerHTML='<p class="no-data">Sin partidos registrados</p>'; return; }
+      el.innerHTML=list.map(p=>{
+        const estado=String(p.estado_tiempo||'').toLowerCase();
+        const isLive=['en vivo','en curso'].includes(estado);
+        const isProg=['programado','pendiente'].includes(estado);
+        const isFin=['finalizado','terminado'].includes(estado);
+        return `<div class="admin-match-card">
+          <div class="amc-header">
+            <span class="amc-disc">${(p.disciplinaId||'').toUpperCase()}</span>
+            <span class="amc-estado ${isLive?'live':isFin?'fin':'prog'}">${p.estado_tiempo||''}</span>
+          </div>
+          <div class="amc-teams">${p.equipoLocal||'Local'} <b>${p.goles1??0} – ${p.goles2??0}</b> ${p.equipoVisita||'Visita'}</div>
+          <div class="amc-meta">${p.programacion||''} · ${p.ubicacion||''}</div>
+          <div class="amc-actions">
+            ${isProg?`<button class="amc-btn start" onclick="adminStartMatch(${p.id})">▶ Iniciar</button>`:''}
+            ${isLive?`<button class="amc-btn stats" onclick="adminOpenStats(${p.id})">📊 Stats</button><button class="amc-btn finish" onclick="adminFinishMatch(${p.id})">⏹ Finalizar</button>`:''}
+            ${isFin?`<button class="amc-btn stats" onclick="openStatsModal(${p.id})">📊 Ver</button>`:''}
+            ${APP.session?.rol==='admin'?`<button class="amc-btn danger" onclick="adminDeleteMatch(${p.id})">🗑</button>`:''}
+          </div>
+        </div>`;
+      }).join('');
+    }).catch(()=>{ el.innerHTML='<p class="no-data">Error cargando partidos</p>'; });
+  }
+
+  window.adminStartMatch = async function(id){
+    if(!confirm('¿Iniciar este partido?')) return;
+    try{
+      const data = await apiFetch('partidos.php',{method:'PUT',body:JSON.stringify({accion:'iniciar',partidoId:id})});
+      toast(data.ok?'Partido iniciado':data.msg, data.ok?'success':'error');
+      renderAdminPartidos();
+    }catch(e){ toast('Error de conexión','error'); }
+  };
+
+  window.adminFinishMatch = async function(id){
+    if(!confirm('¿Finalizar este partido?')) return;
+    try{
+      const data = await apiFetch('partidos.php',{method:'PUT',body:JSON.stringify({accion:'finalizar',partidoId:id})});
+      toast(data.ok?'Partido finalizado y tabla actualizada':data.msg, data.ok?'success':'error');
+      renderAdminPartidos();
+    }catch(e){ toast('Error de conexión','error'); }
+  };
+
+  window.adminDeleteMatch = async function(id){
+    if(!confirm('¿Eliminar este partido? Esta acción es irreversible.')) return;
+    try{
+      const data = await apiFetch('partidos.php',{method:'DELETE',body:JSON.stringify({partidoId:id})});
+      toast(data.ok?'Partido eliminado':data.msg, data.ok?'success':'error');
+      renderAdminPartidos();
+    }catch(e){ toast('Error','error'); }
+  };
+
+  window.adminOpenStats = function(id){
+    Promise.all([
+      apiFetch('partidos_get.php?disciplinaId=futbol'),
+      apiFetch('partidos_get.php?disciplinaId=basket'),
+      apiFetch('partidos_get.php?disciplinaId=voleibol'),
+    ]).then(([r1,r2,r3])=>{
+      const all=[...(r1.data||[]),...(r2.data||[]),...(r3.data||[])];
+      const p=all.find(x=>x.id==id); if(!p) return;
+      APP.partidos=[...APP.partidos.filter(x=>x.id!=id),p];
+      openStatsModal(id);
+    });
+  };
+
+  // ── PUBLICAR PARTIDO ─────────────────────────────
+  async function publicarPartido(){
+    const disc   = document.getElementById('np-disc').value;
+    const ano1   = document.getElementById('np-ano1').value;
+    const men1   = document.getElementById('np-men1').value;
+    const sec1   = document.getElementById('np-sec1').value;
+    const ano2   = document.getElementById('np-ano2').value;
+    const men2   = document.getElementById('np-men2').value;
+    const sec2   = document.getElementById('np-sec2').value;
+    const cancha = document.getElementById('np-cancha').value;
+    const fecha  = document.getElementById('np-fecha').value;
+    const hora   = document.getElementById('np-hora').value;
+    if(!fecha||!hora){ toast('Selecciona fecha y hora','error'); return; }
+
+    // ── VALIDACIÓN: no fines de semana ──
+    // new Date('YYYY-MM-DD') se interpreta en UTC; le agregamos hora del mediodía
+    // para evitar que un desfase de zona horaria corra el día al validar.
+    const fechaCheck = new Date(`${fecha}T12:00:00`);
+    const diaSemana = fechaCheck.getDay(); // 0=domingo, 6=sábado
+    if(diaSemana===0||diaSemana===6){
+      toast('No se pueden programar partidos sábado ni domingo','error');
+      return;
+    }
+
+    // ── VALIDACIÓN: horario permitido 7:00am a 6:00pm ──
+    const [hh,mm] = hora.split(':').map(Number);
+    const minutosTotales = hh*60+mm;
+    const minMinutos = 7*60;   // 7:00 am
+    const maxMinutos  = 18*60; // 6:00 pm
+    if(minutosTotales<minMinutos||minutosTotales>maxMinutos){
+      toast('El horario debe estar entre 7:00 am y 6:00 pm','error');
+      return;
+    }
+
+    const discId=normDisc(disc);
+    const idLocal=generarIdEquipo(ano1,men1,sec1);
+    const idVisita=generarIdEquipo(ano2,men2,sec2);
+    if(idLocal===idVisita){ toast('Los equipos no pueden ser iguales','error'); return; }
+    const equipoLocal=abreviarEquipo(ano1,men1,sec1);
+    const equipoVisita=abreviarEquipo(ano2,men2,sec2);
+    const progStr=`${fecha} - ${hora}`;
+
+    const btn=document.getElementById('btn-publish-match');
+    btn.disabled=true; btn.textContent='Publicando…';
+    try{
+      const data = await apiFetch('partidos.php',{method:'POST',body:JSON.stringify({
+        equipoLocal,equipoVisita,idLocal,idVisita,disciplinaId:discId,
+        ubicacion:cancha,programacion:progStr,
+      })});
+      toast(data.ok?'Partido publicado':data.msg, data.ok?'success':'error');
+      if(data.ok) renderAdminPartidos();
+    }catch(e){ toast('Error de conexión','error'); }
+    finally{ btn.disabled=false; btn.textContent='📅 PUBLICAR PARTIDO'; }
+  }
+
+  // ── VACIAR SISTEMA ──────────────────────────────
+  window.confirmarBorradoTotal = function(){
+    if(!confirm('ACCIÓN IRREVERSIBLE\n\nEsto borrará TODOS los partidos, posiciones y estudiantes.\nLos usuarios NO serán afectados.\n\n¿Estás absolutamente seguro?')) return;
+    if(!confirm('ÚLTIMA ADVERTENCIA\n\nEsta acción NO se puede deshacer.\n\n¿Confirmas el borrado total?')) return;
+    ejecutarBorradoTotal();
+  };
+
+  async function ejecutarBorradoTotal(){
+    try{
+      const data = await apiFetch('sistema.php',{method:'DELETE',body:JSON.stringify({confirmar:true})});
+      toast(data.ok?'Sistema vaciado correctamente':data.msg||'Error', data.ok?'success':'error');
+      if(data.ok){ renderAdminPartidos(); }
+    }catch(e){ toast('Error de conexión','error'); }
+  }
+
+  // ── GESTIÓN DE ROLES ─────────────────────────────────
+  let _rolUsuarioActual = null; // datos del usuario buscado
+
+  function renderRolesPage(){
+    // Limpiar resultado anterior al entrar a la sección
+    document.getElementById('roles-result').style.display = 'none';
+    document.getElementById('roles-cedula').value = '';
+    _rolUsuarioActual = null;
+  }
+
+  window.buscarUsuarioRol = async function(){
+    const cedula = document.getElementById('roles-cedula').value.trim().toUpperCase();
+    if(!cedula){ toast('Ingresa una cédula','error'); return; }
+    if(!/^[VE]\d{6,9}$/.test(cedula)){ toast('Formato inválido (Ej: V12345678)','error'); return; }
+
+    try{
+      const data = await apiFetch(`roles.php?cedula=${encodeURIComponent(cedula)}`);
+      if(!data.ok){ toast(data.msg||'Usuario no encontrado','error'); return; }
+
+      _rolUsuarioActual = data.usuario;
+      document.getElementById('roles-nombre').textContent        = `${data.usuario.nombre} ${data.usuario.apellido}`;
+      document.getElementById('roles-cedula-display').textContent = data.usuario.cedula;
+      document.getElementById('roles-avatar').textContent        = data.usuario.nombre.charAt(0).toUpperCase();
+
+      const badge = document.getElementById('roles-badge');
+      const rol   = data.usuario.rol;
+      badge.textContent = rol.toUpperCase();
+      badge.style.background = rol==='admin' ? '#7C3AED' : rol==='arbitro' ? '#0284C7' : '#64748B';
+      badge.style.color = 'white';
+
+      // Mostrar/ocultar botones según rol actual
+      const btnDar    = document.getElementById('btn-dar-arbitro');
+      const btnQuitar = document.getElementById('btn-quitar-rol');
+
+      if(rol === 'admin'){
+        // No se puede modificar al admin
+        btnDar.style.display    = 'none';
+        btnQuitar.style.display = 'none';
+        toast('Este usuario es el Administrador global y no puede ser modificado','error');
+      } else if(rol === 'arbitro'){
+        btnDar.style.display    = 'none';
+        btnQuitar.style.display = 'flex';
+      } else {
+        // rol === 'usuario'
+        btnDar.style.display    = 'flex';
+        btnQuitar.style.display = 'none';
+      }
+
+      document.getElementById('roles-result').style.display = 'block';
+    }catch(e){
+      toast('Error de conexión','error');
+    }
+  };
+
+  window.cambiarRol = async function(nuevoRol){
+    if(!_rolUsuarioActual){ toast('Busca un usuario primero','error'); return; }
+    if(_rolUsuarioActual.rol === 'admin'){ toast('No puedes modificar al administrador','error'); return; }
+    if(!confirm(`¿Cambiar rol de ${_rolUsuarioActual.nombre} a "${nuevoRol}"?`)) return;
+
+    try{
+      const data = await apiFetch('roles.php', {
+        method: 'PUT',
+        body: JSON.stringify({ cedula: _rolUsuarioActual.cedula, nuevoRol }),
+      });
+      if(!data.ok){ toast(data.msg||'Error al cambiar rol','error'); return; }
+      toast(`Rol de ${_rolUsuarioActual.nombre} cambiado a ${nuevoRol} correctamente`, 'success');
+      // Refrescar la búsqueda para mostrar el nuevo rol
+      await buscarUsuarioRol();
+    }catch(e){
+      toast('Error de conexión','error');
+    }
+  };
+
+  // ── REGISTRAR ESTUDIANTE ─────────────────────────
+  async function registrarEstudiante(){
+    const nombre   = document.getElementById('est-nombre').value.trim().toUpperCase();
+    const apellido = document.getElementById('est-apellido').value.trim().toUpperCase();
+    const tipod    = document.getElementById('est-tipo').value;
+    const cnum     = document.getElementById('est-cedula').value.trim();
+    const ano      = document.getElementById('est-ano').value;
+    const mencion  = document.getElementById('est-mencion').value;
+    const seccion  = document.getElementById('est-seccion').value;
+    const disc     = document.getElementById('est-disc').value;
+
+    if(!nombre||!apellido||!cnum){ toast('Completa todos los campos','error'); return; }
+    if(/[^a-zA-ZáéíóúÁÉÍÓÚñÑüÜ\s]/.test(nombre)||/[^a-zA-ZáéíóúÁÉÍÓÚñÑüÜ\s]/.test(apellido)){
+      toast('Solo letras en nombre y apellido','error'); return;
+    }
+    const cedula=`${tipod}${cnum}`;
+    const idEquipo=generarIdEquipo(ano,mencion,seccion);
+    const btn=document.getElementById('btn-register-student');
+    btn.disabled=true; btn.textContent='Registrando…';
+    try{
+      const data = await apiFetch('estudiantes.php',{method:'POST',body:JSON.stringify({
+        nombre,apellido,cedula,tipoDocumento:tipod,ano,mencion,seccion,
+        disciplina:disc,disciplinaId:normDisc(disc),idEquipo,
+      })});
+      toast(data.ok?'Estudiante registrado':data.msg, data.ok?'success':'error');
+      if(data.ok){
+        document.getElementById('est-nombre').value='';
+        document.getElementById('est-apellido').value='';
+        document.getElementById('est-cedula').value='';
+      }
+    }catch(e){ toast('Error de conexión','error'); }
+    finally{ btn.disabled=false; btn.textContent='✅ REGISTRAR ESTUDIANTE'; }
+  }
+
+  // ══════════════════════════════════════════════════
+  //  REGISTRO DE CUENTA
+  // ══════════════════════════════════════════════════
+  const validarEmailReg = (email) => {
+    const rx = /^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$/;
+    if (!rx.test(email)) return { valido: false, msj: 'El formato del correo es inválido.' };
+    const [, dom] = email.split('@');
+    const partes = dom.split('.');
+    const nombre = partes[0];
+    const ext    = partes[partes.length - 1];
+    const malDom = ['gmai','hotmai','outloo','yaho','iclou'];
+    const malExt = ['c','co','con','comn','comm','ne','nett'];
+    if (malDom.includes(nombre)) return { valido: false, msj: `Dominio incorrecto: "${nombre}".` };
+    if (malExt.includes(ext))    return { valido: false, msj: `Extensión inválida: ".${ext}".` };
+    if (nombre === 'gmail'   && ext !== 'com') return { valido: false, msj: 'Gmail siempre termina en .com' };
+    if (nombre === 'hotmail' && !['com','es'].includes(ext)) return { valido: false, msj: 'Hotmail: .com o .es' };
+    if (nombre === 'outlook' && !['com','es'].includes(ext)) return { valido: false, msj: 'Outlook: .com o .es' };
+    return { valido: true, msj: '' };
+  };
+
+  const validarPassReg = (p) => {
+    if (!p || p.length < 8)  return { valido: false, msj: 'Mínimo 8 caracteres.' };
+    if (p.length > 16)       return { valido: false, msj: 'Máximo 16 caracteres.' };
+    if (/[^a-zA-Z0-9.]/.test(p)) return { valido: false, msj: 'Solo letras, números y puntos.' };
+    if (/^\d+$/.test(p))    return { valido: false, msj: 'No puede ser solo números.' };
+    return { valido: true, msj: '' };
+  };
+
+  async function handleRegistro() {
+    const tipoBtn  = document.querySelector('.reg-tipo-btn.active');
+    const tipoDoc  = tipoBtn ? tipoBtn.dataset.tipo : 'V';
+    const nom      = document.getElementById('reg-nombre').value.trim();
+    const ape      = document.getElementById('reg-apellido').value.trim();
+    const cedNums  = document.getElementById('reg-cedula').value.trim();
+    const mail     = document.getElementById('reg-email').value.trim().toLowerCase();
+    const pass     = document.getElementById('reg-pass').value;
+    const conf     = document.getElementById('reg-pass-confirm').value;
+    const cedulaFull = `${tipoDoc}${cedNums}`;
+
+    if (!nom || !ape || !cedNums || !mail || !pass || !conf) {
+      toast('Completa todos los campos', 'error'); return;
+    }
+    if (nom.replace(/\s/g,'').length < 2) { toast('Nombre demasiado corto', 'error'); return; }
+    if (ape.replace(/\s/g,'').length < 2) { toast('Apellido demasiado corto', 'error'); return; }
+
+    const longMin = tipoDoc === 'V' ? 7 : 6;
+    const longMax = tipoDoc === 'V' ? 8 : 9;
+    if (cedNums.length < longMin || cedNums.length > longMax) {
+      toast(tipoDoc === 'V' ? 'Cédula venezolana: 7 u 8 dígitos' : 'Cédula extranjera: 6 a 9 dígitos', 'error'); return;
+    }
+    const ve = validarEmailReg(mail);
+    if (!ve.valido) { toast(ve.msj, 'error'); return; }
+    const vp = validarPassReg(pass);
+    if (!vp.valido) { toast(vp.msj, 'error'); return; }
+    if (pass !== conf) { toast('Las contraseñas no coinciden', 'error'); return; }
+
+    const btn = document.getElementById('btn-create-account');
+    btn.disabled = true; btn.textContent = 'Creando cuenta…';
+    try {
+      const data = await apiFetch('registro.php',{method:'POST',body:JSON.stringify({
+        tipoDoc, cedula: cedulaFull, nombre: nom, apellido: ape,
+        emailRecuperacion: mail, password: pass,
+      })});
+      if(!data.ok){ toast(data.msg||'Error al registrar','error'); return; }
+      toast('¡Cuenta creada! Ya puedes iniciar sesión.', 'success');
+      setTimeout(() => {
+        showScreen('login');
+        document.getElementById('reg-nombre').value = '';
+        document.getElementById('reg-apellido').value = '';
+        document.getElementById('reg-cedula').value = '';
+        document.getElementById('reg-email').value = '';
+        document.getElementById('reg-pass').value = '';
+        document.getElementById('reg-pass-confirm').value = '';
+      }, 1800);
+    } catch(e) { toast('Error de conexión. Intenta más tarde.', 'error'); }
+    finally { btn.disabled = false; btn.textContent = 'CREAR CUENTA'; }
+  }
+
+  // ══════════════════════════════════════════════════
+  //  TOAST
+  // ══════════════════════════════════════════════════
+  // ══════════════════════════════════════════════════
+  //  MANUAL DE USUARIO
+  // ══════════════════════════════════════════════════
+  const MANUAL_KEY = 'intercursos_manual_visto_v1';
+
+  const GRADIENTES = {
+    azul:    'linear-gradient(135deg,#0284C7,#38BDF8)',
+    verde:   'linear-gradient(135deg,#10B981,#34D399)',
+    rojo:    'linear-gradient(135deg,#EF4444,#F87171)',
+    purpura: 'linear-gradient(135deg,#8B5CF6,#A78BFA)',
+    amber:   'linear-gradient(135deg,#F59E0B,#FCD34D)',
+    gris:    'linear-gradient(135deg,#64748B,#94A3B8)',
+  };
+
+  const SLIDES_USUARIO = [
+    { icon:'🏠', grad:GRADIENTES.azul,    titulo:'¡Bienvenido a Intercursos!',           desc:'El portal oficial de los Intercursos de la E.T. "José Ricardo Guillén Suárez". Aquí podrás seguir todos los partidos, posiciones y nóminas en tiempo real desde cualquier navegador.' },
+    { icon:'⚽', grad:GRADIENTES.verde,   titulo:'Selecciona tu disciplina',              desc:'En la barra superior encontrarás tres píldoras: ⚽ Fútbol, 🏀 Basket y 🏐 Voleibol. Haz clic en cualquiera para filtrar partidos, posiciones y estadísticas de esa disciplina.' },
+    { icon:'🔴', grad:GRADIENTES.rojo,    titulo:'Partidos en Vivo',                      desc:'Los partidos activos aparecen en rojo con el indicador 🔴 EN VIVO. Verás el marcador actualizado y el minuto en tiempo real. Haz clic en la tarjeta para ver las estadísticas completas del partido.' },
+    { icon:'📅', grad:GRADIENTES.purpura, titulo:'Próximos Partidos y Resultados',        desc:'Consulta los encuentros programados con fecha, hora y cancha. Los partidos finalizados muestran el marcador final. Haz clic en cualquier resultado para ver la cronología de anotaciones.' },
+    { icon:'🏆', grad:GRADIENTES.amber,   titulo:'Tabla de Posiciones',                   desc:'Se actualiza automáticamente al finalizar cada partido. Muestra posición, puntos, PJ, PG, PE (Fútbol), PP, GF, GC y diferencial. Los 3 primeros lugares aparecen destacados en azul.' },
+    { icon:'⭐', grad:GRADIENTES.amber,   titulo:'Mayor Anotador',                        desc:'El jugador con más puntos de la disciplina activa aparece con el trofeo 🏆. Se muestran sus estadísticas acumuladas: goles (Fútbol), TL/2P/3P (Básquet) o Kill/Ace/Bloqueo (Voleibol).' },
+    { icon:'👥', grad:GRADIENTES.azul,    titulo:'Nómina de Jugadores',                   desc:'En el menú lateral ve a "Nóminas" para consultar todos los jugadores inscritos, organizados por año, mención y sección en un acordeón interactivo con estadísticas de cada jugador.' },
+    { icon:'🔄', grad:GRADIENTES.verde,   titulo:'Actualización automática',              desc:'El portal se actualiza automáticamente cada 5 segundos. No necesitas recargar la página. Cualquier cambio realizado por el árbitro o administrador se reflejará en tu pantalla de inmediato.' },
+    { icon:'✅', grad:GRADIENTES.verde,   titulo:'¡Listo para disfrutar!',                desc:'Ya conoces todo lo necesario para seguir los Intercursos desde el portal web. Recuerda que puedes volver a este manual en cualquier momento desde el menú lateral → Ayuda / Manual. ¡Éxito! 🏆' },
+  ];
+
+  const SLIDES_ARBITRO = [
+    ...SLIDES_USUARIO.slice(0,-1),
+    { icon:'⚙️', grad:GRADIENTES.amber,   titulo:'Tu rol: Árbitro',                       desc:'Como Árbitro tienes acceso al Panel Admin desde el menú lateral. Puedes crear partidos, iniciarlos, anotar puntos y registrar estadísticas. No puedes eliminar partidos ni vaciar el sistema.' },
+    { icon:'➕', grad:GRADIENTES.verde,   titulo:'Crear y gestionar partidos',             desc:'En el tab "Nuevo Partido" selecciona disciplina, equipos (año+mención+sección), cancha, fecha y hora. Solo se permiten días hábiles entre 7:00 AM y 6:00 PM. Inicia el partido desde el tab "Partidos".' },
+    { icon:'⚽', grad:GRADIENTES.rojo,    titulo:'Anotar puntos en vivo',                  desc:'Durante un partido EN VIVO haz clic en "+ Pts EQUIPO 1" o "+ Pts EQUIPO 2". Elige el tipo (Gol / TL / Doble / Triple / Kill / Ace / Bloqueo) y selecciona al jugador anotador de la lista.' },
+    { icon:'📊', grad:GRADIENTES.purpura, titulo:'Registrar estadísticas',                 desc:'Haz clic en "📊 Stats" del partido para ingresar estadísticas detalladas por disciplina. Usa los botones + y - para cada valor. Guarda con el botón "GUARDAR ESTADÍSTICAS".' },
+    { icon:'↩️', grad:GRADIENTES.gris,    titulo:'Corregir un error',                      desc:'Si anotaste un punto por error, haz clic en "⏪ Deshacer" en el panel del partido. Esto revierte el último evento: descuenta el marcador y las estadísticas del jugador automáticamente.' },
+    { icon:'✅', grad:GRADIENTES.verde,   titulo:'¡Listo, Árbitro!',                       desc:'Ya puedes gestionar los partidos profesionalmente. Al finalizar un partido la tabla de posiciones se actualiza sola. Recuerda: este manual siempre estará en el menú lateral. ¡Éxito! 🏆' },
+  ];
+
+  const SLIDES_ADMIN = [
+    ...SLIDES_ARBITRO.slice(0,-1),
+    { icon:'🛡️', grad:GRADIENTES.purpura, titulo:'Gestionar Roles de Árbitro',            desc:'Solo tú como Administrador puedes asignar el rol Árbitro. Ve a "Gestionar Roles" en el menú, ingresa la cédula del usuario (Ej: V12345678), haz clic en "Buscar" y luego en "Dar Árbitro".' },
+    { icon:'🗑️', grad:GRADIENTES.rojo,    titulo:'Eliminar partidos y reiniciar',          desc:'Desde el tab "Partidos" del Panel Admin puedes eliminar partidos individuales con el botón 🗑️. Para vaciar todo el torneo, usa el botón "Reiniciar sistema" (requiere doble confirmación).' },
+    { icon:'✅', grad:GRADIENTES.verde,   titulo:'¡Listo, Administrador!',                 desc:'Tienes control total del sistema. Usa con responsabilidad las funciones de eliminación. Este manual siempre estará disponible en el menú lateral → Ayuda / Manual. ¡Los Intercursos están en buenas manos! 🏆' },
+  ];
+
+  let _manualSlides = [];
+  let _manualIdx    = 0;
+  let _manualAuto   = false;
+
+  window.abrirManual = function(auto = false){
+    _manualAuto  = auto;
+    const rol    = APP.session?.rol || 'usuario';
+    _manualSlides = rol==='admin' ? SLIDES_ADMIN : rol==='arbitro' ? SLIDES_ARBITRO : SLIDES_USUARIO;
+    _manualIdx   = 0;
+
+    // Gradiente del header según rol
+    const headerEl = document.getElementById('manual-header');
+    const gradiente = rol==='admin' ? GRADIENTES.purpura : rol==='arbitro' ? GRADIENTES.amber : GRADIENTES.azul;
+    headerEl.style.background = gradiente;
+
+    // Etiqueta de rol
+    const rolLabel = rol.charAt(0).toUpperCase() + rol.slice(1);
+    document.getElementById('manual-rol-label').textContent = `Intercursos · ${rolLabel}`;
+
+    _renderManual();
+    document.getElementById('modal-manual').style.display = 'flex';
+    closeMobileSidebar();
+  };
+
+  window.cerrarManual = function(){
+    document.getElementById('modal-manual').style.display = 'none';
+    if(_manualAuto) localStorage.setItem(MANUAL_KEY, 'true');
+  };
+
+  window.manualSiguiente = function(){
+    if(_manualIdx >= _manualSlides.length - 1){ cerrarManual(); return; }
+    _manualIdx++;
+    _renderManual();
+  };
+
+  window.manualAnterior = function(){
+    if(_manualIdx <= 0) return;
+    _manualIdx--;
+    _renderManual();
+  };
+
+  function _renderManual(){
+    const total     = _manualSlides.length;
+    const slide     = _manualSlides[_manualIdx];
+    const esUltimo  = _manualIdx === total - 1;
+    const esPrimero = _manualIdx === 0;
+    const boxW      = Math.min(560, window.innerWidth * 0.94);
+
+    // Slides container
+    const container = document.getElementById('manual-slides');
+    container.style.width    = `${boxW * total}px`;
+    container.style.transform= `translateX(-${_manualIdx * boxW}px)`;
+
+    // Renderizar todos los slides si aún no están
+    if(container.children.length !== total){
+      container.innerHTML = _manualSlides.map((s,i) => `
+        <div style="width:${boxW}px;min-height:260px;display:flex;flex-direction:column;align-items:center;justify-content:center;padding:28px 32px;text-align:center;box-sizing:border-box;">
+          <div style="width:96px;height:96px;border-radius:48px;background:${s.grad};display:flex;align-items:center;justify-content:center;font-size:44px;margin-bottom:22px;box-shadow:0 8px 24px rgba(0,0,0,0.15);">${s.icon}</div>
+          <div style="font-size:20px;font-weight:900;color:#0F172A;margin-bottom:14px;line-height:1.3;">${s.titulo}</div>
+          <div style="font-size:14px;color:#475569;line-height:1.7;font-weight:500;">${s.desc}</div>
+        </div>
+      `).join('');
+    }
+
+    // Dots
+    const dotsEl = document.getElementById('manual-dots');
+    dotsEl.innerHTML = _manualSlides.map((_,i) => `
+      <div onclick="_manualGoTo(${i})" style="cursor:pointer;height:8px;border-radius:4px;background:${i===_manualIdx?'#0284C7':'#E2E8F0'};width:${i===_manualIdx?'24px':'8px'};transition:all .3s;"></div>
+    `).join('');
+
+    // Counter
+    document.getElementById('manual-counter').textContent = `${_manualIdx+1} / ${total}`;
+
+    // Botones
+    document.getElementById('manual-btn-prev').style.opacity = esPrimero ? '0.3' : '1';
+    document.getElementById('manual-btn-prev').disabled = esPrimero;
+    document.getElementById('manual-btn-next').textContent = esUltimo ? '¡Comenzar! ✓' : 'Siguiente ›';
+
+    // Saltar
+    document.getElementById('manual-saltar-wrap').style.display = esUltimo ? 'none' : 'block';
+  }
+
+  window._manualGoTo = function(i){
+    _manualIdx = i;
+    _renderManual();
+  };
+
+  // Cerrar al hacer clic fuera del box
+  // NOTA: Se registra en initManualListener() llamado desde bootDashboard
+  // para evitar null (el elemento HTML está más abajo que este script)
+  window.initManualListener = function(){
+    const m = document.getElementById('modal-manual');
+    if(m) m.addEventListener('click', function(e){ if(e.target===this) cerrarManual(); });
+  };
+
+  // ── Auto-mostrar la primera vez que entra al dashboard ───────────
+  function checkAutoManual(){
+    const visto = localStorage.getItem(MANUAL_KEY);
+    if(!visto){
+      setTimeout(() => abrirManual(true), 600);
+    }
+  }
+
+
+  // ── MANUAL POR SECCIÓN ───────────────────────────────────────────────────
+  const MANUAL_SECTION_KEYS = {
+    admin: 'intercursos_manual_admin_v1',
+    roles: 'intercursos_manual_roles_v1',
+  };
+
+  // Slides del mini-manual de Panel Admin
+  const MINI_SLIDES_ADMIN = [
+    { icon:'⚙️', grad:['#0284C7','#38BDF8'], title:'Panel de Gestión',
+      desc:'Desde aquí puedes programar partidos, inscribir jugadores y gestionar los Intercursos en tiempo real.' },
+    { icon:'📅', grad:['#8B5CF6','#A78BFA'], title:'Programar Partidos',
+      desc:'Ve a la pestaña "Publicar". Selecciona disciplina, equipos, cancha y horario (lun–vie, 7AM–6PM).' },
+    { icon:'▶️', grad:['#EF4444','#F87171'], title:'Iniciar un Partido',
+      desc:'En la pestaña "Partidos", presiona ▶ en el partido programado para marcarlo como En Vivo.' },
+    { icon:'⚽', grad:['#10B981','#34D399'], title:'Anotar Puntos',
+      desc:'Con el partido En Vivo, haz clic en "Gestionar" → selecciona el tipo de anotación y el jugador.' },
+    { icon:'🏁', grad:['#F59E0B','#FCD34D'], title:'Finalizar Partido',
+      desc:'Al terminar, presiona 🏁 para finalizar. La tabla de posiciones se actualiza automáticamente.' },
+    { icon:'✅', grad:['#10B981','#34D399'], title:'¡Listo!',
+      desc:'Ya conoces el panel. Recuerda: solo el Administrador puede eliminar partidos y vaciar el sistema.' },
+  ];
+
+  // Slides del mini-manual de Gestionar Roles
+  const MINI_SLIDES_ROLES = [
+    { icon:'🛡️', grad:['#8B5CF6','#A78BFA'], title:'Gestionar Roles',
+      desc:'Desde aquí puedes dar o quitar el rol de Árbitro a cualquier usuario registrado en el sistema.' },
+    { icon:'🔍', grad:['#0284C7','#38BDF8'], title:'Buscar por Cédula',
+      desc:'Ingresa la cédula completa con prefijo (Ej: V12345678) y presiona Buscar para ver el rol actual.' },
+    { icon:'✅', grad:['#10B981','#34D399'], title:'Dar rol de Árbitro',
+      desc:'Si el usuario tiene rol "usuario", aparecerá el botón verde para promoverlo a Árbitro.' },
+    { icon:'🔄', grad:['#64748B','#94A3B8'], title:'Revocar rol de Árbitro',
+      desc:'Si el usuario ya es Árbitro, aparecerá el botón para revertirlo a Usuario básico.' },
+    { icon:'⚠️', grad:['#F59E0B','#FCD34D'], title:'Restricciones',
+      desc:'No es posible asignar rol de Administrador desde aquí. El único admin global es V10000000.' },
+    { icon:'✅', grad:['#10B981','#34D399'], title:'¡Entendido!',
+      desc:'Los cambios de rol se aplican de inmediato. El usuario verá su nuevo acceso en el próximo login.' },
+  ];
+
+  function checkSectionManual(section){
+    if(section !== 'admin' && section !== 'roles') return;
+    const key = MANUAL_SECTION_KEYS[section];
+    if(localStorage.getItem(key)) return; // ya visto
+    const slides = section === 'admin' ? MINI_SLIDES_ADMIN : MINI_SLIDES_ROLES;
+    setTimeout(() => abrirMiniManual(slides, key), 700);
+  }
+
+  // ── Mini-manual de sección (modal compacto) ───────────────────────────
+  let _miniIdx = 0;
+  let _miniSlides = [];
+  let _miniKey = '';
+
+  window.abrirMiniManual = function(slides, key){
+    _miniIdx = 0;
+    _miniSlides = slides;
+    _miniKey = key;
+    const overlay = document.getElementById('modal-mini-manual');
+    if(!overlay) return;
+    _renderMini();
+    overlay.style.display = 'flex';
+  };
+
+  window.cerrarMiniManual = function(){
+    if(_miniKey) localStorage.setItem(_miniKey, 'true');
+    document.getElementById('modal-mini-manual').style.display = 'none';
+  };
+
+  window.miniSiguiente = function(){
+    if(_miniIdx >= _miniSlides.length - 1){ cerrarMiniManual(); return; }
+    _miniIdx++;
+    _renderMini();
+  };
+
+  window.miniAnterior = function(){
+    if(_miniIdx <= 0) return;
+    _miniIdx--;
+    _renderMini();
+  };
+
+  function _renderMini(){
+    const s = _miniSlides[_miniIdx];
+    const total = _miniSlides.length;
+    const esPrimero = _miniIdx === 0;
+    const esUltimo  = _miniIdx === total - 1;
+
+    document.getElementById('mini-icon').textContent = s.icon;
+    document.getElementById('mini-icon').style.background = `linear-gradient(135deg,${s.grad[0]},${s.grad[1]})`;
+    document.getElementById('mini-title').textContent = s.title;
+    document.getElementById('mini-desc').textContent  = s.desc;
+    document.getElementById('mini-counter').textContent = `${_miniIdx+1} / ${total}`;
+    document.getElementById('mini-btn-next').textContent = esUltimo ? '¡Entendido! ✓' : 'Siguiente ›';
+    document.getElementById('mini-btn-prev').style.opacity = esPrimero ? '0.3' : '1';
+    document.getElementById('mini-btn-prev').disabled = esPrimero;
+
+    // Dots
+    const dotsEl = document.getElementById('mini-dots');
+    dotsEl.innerHTML = _miniSlides.map((_,i) =>
+      `<div onclick="window._miniGoTo(${i})" style="
+        width:${i===_miniIdx?'20px':'8px'};height:8px;border-radius:4px;cursor:pointer;transition:all .3s;
+        background:${i===_miniIdx?'#0284C7':'#E2E8F0'};"></div>`
+    ).join('');
+  }
+
+  window._miniGoTo = function(i){ _miniIdx=i; _renderMini(); };
+
+  // Registrar listener del mini-modal
+  window.initMiniManualListener = function(){
+    const m = document.getElementById('modal-mini-manual');
+    if(m) m.addEventListener('click', function(e){ if(e.target===this) cerrarMiniManual(); });
+  };
+
+  window.toast = function(msg,type='success'){
+    const t=document.createElement('div');
+    t.className=`toast ${type}`;
+    t.textContent=msg;
+    document.getElementById('toast-container').appendChild(t);
+    setTimeout(()=>t.classList.add('show'),10);
+    setTimeout(()=>{ t.classList.remove('show'); setTimeout(()=>t.remove(),400); },3000);
+  };
+</script>
+
+<!-- EmailJS -->
+<script src="https://cdn.jsdelivr.net/npm/@emailjs/browser@4/dist/email.min.js"></script>
+<script>emailjs.init('Etf12-NaSwAtvUKCA');</script>
+
+<style>
+/* ═══════════════════════════ RESET & BASE ═══════════════════════════ */
+*,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+:root{
+  --primary:#0284C7;--primary-dark:#0369A1;--accent:#00D1FF;
+  --green:#10B981;--amber:#F59E0B;--red:#EF4444;
+  --bg:#F1F5F9;--surface:#fff;--surface2:#F8FAFC;
+  --border:#E2E8F0;--text:#0F172A;--sub:#64748B;--muted:#94A3B8;
+  --sidebar:240px;--header:64px;
+  --radius:14px;--shadow:0 2px 12px rgba(0,0,0,.06);
+  --shadow-lg:0 8px 32px rgba(0,0,0,.12);
+  --font:'Inter',system-ui,sans-serif;
+}
+html,body{height:100%;font-family:var(--font);background:var(--bg);color:var(--text);font-size:14px;line-height:1.5}
+
+/* ─── SCREENS ─── */
+.screen{display:none}
+.screen.active{display:flex;height:100vh;width:100vw}
+
+/* ═══════════════════════════ LOGIN ═══════════════════════════ */
+#screen-login,#screen-recover{
+  background:#FFFFFF;
+  align-items:center;justify-content:center;
+}
+.auth-card{
+  background:#FFFFFF;
+  border:1px solid var(--border);
+  border-radius:24px;
+  padding:44px 40px;
+  width:420px;
+  box-shadow:0 16px 48px rgba(2,132,199,.12);
+}
+.auth-logo{display:flex;flex-direction:column;align-items:center;margin-bottom:32px;gap:10px}
+.auth-logo-circle{
+  width:80px;height:80px;border-radius:50%;background:#fff;
+  display:flex;align-items:center;justify-content:center;
+  box-shadow:0 0 0 4px rgba(2,132,199,.1),0 8px 20px rgba(2,132,199,.18);font-size:40px;
+  border:1px solid var(--border);
+}
+.auth-school{color:var(--sub);font-size:11px;font-weight:700;text-align:center;text-transform:uppercase;letter-spacing:.5px}
+.auth-title{color:var(--primary);font-size:28px;font-weight:900;letter-spacing:1px}
+.auth-subtitle{color:var(--sub);font-size:13px;text-align:center;margin-bottom:24px}
+
+.field-label{color:var(--sub);font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.8px;margin-bottom:6px}
+.field-row{display:flex;gap:8px;margin-bottom:18px}
+.auth-select,.auth-input{
+  background:var(--surface2);border:1.5px solid var(--border);
+  border-radius:10px;color:var(--text);padding:12px 14px;font-size:14px;
+  outline:none;transition:border .2s,box-shadow .2s;
+  box-shadow:0 1px 3px rgba(15,23,42,.04) inset;
+}
+.auth-select:focus,.auth-input:focus{border-color:var(--primary);box-shadow:0 0 0 3px rgba(2,132,199,.12);}
+.auth-select option{background:#fff;color:var(--text)}
+.auth-select{width:72px;flex-shrink:0}
+.auth-input{width:100%;display:block;margin-bottom:18px}
+.auth-input::placeholder{color:var(--muted)}
+.auth-input[type=password]{letter-spacing:2px}
+
+.btn-primary{
+  width:100%;padding:14px;border:none;border-radius:12px;
+  background:var(--primary);color:#fff;font-weight:900;font-size:15px;
+  letter-spacing:.5px;cursor:pointer;transition:background .15s,transform .1s;
+  box-shadow:0 4px 16px rgba(2,132,199,.25);
+}
+.btn-primary:hover{background:var(--primary-dark)}
+.btn-primary:active{transform:scale(.98)}
+.btn-primary:disabled{opacity:.6;cursor:not-allowed}
+
+.auth-links{margin-top:20px;display:flex;flex-direction:column;gap:8px;align-items:center}
+.auth-link{background:none;border:none;color:var(--sub);font-size:13px;cursor:pointer;text-decoration:underline;padding:4px}
+.auth-link:hover{color:var(--primary)}
+.auth-link b{color:var(--primary)}
+
+/* Recover steps */
+.recover-step{display:none}
+.recover-step.active{display:block}
+.recover-result-box{
+  background:var(--surface2);border:1px solid var(--primary);border-radius:14px;
+  padding:20px;text-align:center;margin-bottom:20px;
+  box-shadow:0 4px 16px rgba(2,132,199,.1);
+}
+.recover-label{color:var(--sub);font-size:11px;font-weight:700;text-transform:uppercase;margin-bottom:4px}
+.recover-value{color:var(--primary);font-size:22px;font-weight:900;margin-bottom:12px}
+
+/* ═══════════════════════════ DASHBOARD ═══════════════════════════ */
+#screen-dashboard{flex-direction:row;overflow:hidden}
+
+/* SIDEBAR */
+.sidebar{
+  width:var(--sidebar);height:100vh;
+  background:linear-gradient(180deg,#0369A1 0%,#0284C7 100%);
+  display:flex;flex-direction:column;flex-shrink:0;
+  box-shadow:4px 0 20px rgba(0,0,0,.12);z-index:10;
+  position:relative;
+}
+.sidebar-close-btn{display:none}
+.sidebar-overlay{display:none}
+.hamburger-btn{display:none}
+.sidebar-brand{
+  padding:24px 20px;display:flex;align-items:center;gap:12px;
+  border-bottom:1px solid rgba(255,255,255,.12);
+}
+.sidebar-icon{
+  width:44px;height:44px;background:#fff;border-radius:12px;
+  display:flex;align-items:center;justify-content:center;font-size:22px;flex-shrink:0;
+}
+.sidebar-brand-text{color:#fff}
+.sidebar-brand-text b{display:block;font-size:13px;font-weight:800;letter-spacing:.3px}
+.sidebar-brand-text span{font-size:10px;opacity:.75}
+
+.nav-group{padding:10px 0}
+.nav-label{color:rgba(255,255,255,.45);font-size:9px;font-weight:800;letter-spacing:1.2px;padding:8px 20px 4px}
+.nav-item{
+  display:flex;align-items:center;gap:10px;
+  padding:12px 18px;cursor:pointer;border:none;background:none;width:100%;
+  color:rgba(255,255,255,.75);font-size:13px;font-weight:600;
+  transition:background .15s,color .15s;border-radius:0;text-align:left;
+  white-space:nowrap;overflow:hidden;text-overflow:ellipsis;
+}
+.nav-item:hover{background:rgba(255,255,255,.1);color:#fff}
+.nav-item.active{background:rgba(255,255,255,.18);color:#fff;box-shadow:inset 3px 0 0 #00D1FF}
+.nav-item .nav-icon{font-size:16px;width:18px;text-align:center;flex-shrink:0}
+
+.sidebar-footer{margin-top:auto;padding:16px 20px;border-top:1px solid rgba(255,255,255,.12)}
+.user-card{display:flex;align-items:center;gap:10px;margin-bottom:12px}
+.user-avatar{
+  width:36px;height:36px;border-radius:10px;background:rgba(255,255,255,.2);
+  display:flex;align-items:center;justify-content:center;color:#fff;font-weight:900;font-size:15px;
+}
+.user-info b{display:block;color:#fff;font-size:12px;font-weight:700}
+.user-info span{color:rgba(255,255,255,.6);font-size:10px}
+.btn-logout{
+  width:100%;padding:9px;border-radius:10px;border:1px solid rgba(255,255,255,.2);
+  background:rgba(239,68,68,.15);color:#FCA5A5;font-size:12px;font-weight:700;
+  cursor:pointer;transition:background .15s;
+}
+.btn-logout:hover{background:rgba(239,68,68,.3)}
+
+/* MAIN */
+.main-area{flex:1;display:flex;flex-direction:column;overflow:hidden}
+
+/* TOP BAR */
+.topbar{
+  height:var(--header);background:var(--surface);border-bottom:1px solid var(--border);
+  display:flex;align-items:center;padding:0 28px;gap:20px;flex-shrink:0;
+  box-shadow:0 1px 4px rgba(0,0,0,.04);
+}
+.topbar-title{font-size:18px;font-weight:800;color:var(--text);flex:1}
+.disc-pills{display:flex;gap:8px}
+.disc-pill{
+  padding:7px 16px;border-radius:20px;border:1.5px solid var(--border);
+  background:var(--surface2);color:var(--sub);font-size:12px;font-weight:700;
+  cursor:pointer;transition:all .15s;
+}
+.disc-pill:hover{border-color:var(--primary);color:var(--primary)}
+.disc-pill.active{background:var(--primary);color:#fff;border-color:var(--primary);box-shadow:0 2px 8px rgba(2,132,199,.25)}
+
+/* CONTENT */
+.content{flex:1;overflow-y:auto;padding:24px 28px}
+.section-page{display:none}
+.section-page.active{display:block}
+
+/* ── GRID LAYOUTS ── */
+.grid-2{display:grid;grid-template-columns:1fr 1fr;gap:20px}
+.grid-3{display:grid;grid-template-columns:1fr 1fr 1fr;gap:20px}
+.col-span-2{grid-column:span 2}
+
+/* CARD */
+.card{background:var(--surface);border-radius:var(--radius);padding:20px;border:1px solid var(--border);box-shadow:var(--shadow)}
+.card-header{display:flex;align-items:center;justify-content:space-between;margin-bottom:16px}
+.card-title{font-size:13px;font-weight:800;color:var(--text);text-transform:uppercase;letter-spacing:.5px}
+.card-badge{
+  background:var(--red);color:#fff;font-size:10px;font-weight:800;
+  border-radius:20px;padding:2px 8px;display:inline-flex;align-items:center;gap:4px;
+}
+.card-badge::before{content:'';width:6px;height:6px;background:#fff;border-radius:50%;display:inline-block;animation:pulse 1.2s infinite}
+@keyframes pulse{0%,100%{opacity:1}50%{opacity:.3}}
+
+/* MATCH CARDS */
+.match-card{
+  background:var(--surface2);border:1px solid var(--border);border-radius:12px;
+  padding:16px;margin-bottom:10px;cursor:pointer;transition:box-shadow .15s,transform .1s;
+}
+.match-card:hover{box-shadow:0 4px 16px rgba(0,0,0,.08);transform:translateY(-1px)}
+.live-card{background:#FFF5F5;border-color:var(--red)}
+.match-row{display:flex;align-items:center;justify-content:space-between;margin-bottom:8px}
+.team-col{flex:1;text-align:center}
+.team-name{font-size:13px;font-weight:700;color:var(--text)}
+.score-col{flex-shrink:0;padding:0 12px;text-align:center}
+.score{font-size:22px;font-weight:900}
+.live-score{color:var(--red)}
+.result-score{color:var(--primary)}
+.vs-badge{
+  background:var(--surface2);border:1.5px solid var(--border);color:var(--muted);
+  font-size:10px;font-weight:900;padding:4px 10px;border-radius:20px;
+}
+.match-meta{display:flex;gap:12px;justify-content:center;font-size:11px;color:var(--sub)}
+.finalizado-tag{color:var(--muted);font-size:10px;font-weight:800;letter-spacing:1px;text-align:center;margin-top:4px}
+.live-indicator{display:flex;align-items:center;gap:6px;font-size:11px;font-weight:800;color:var(--red);margin-bottom:8px}
+.red-dot{width:8px;height:8px;border-radius:50%;background:var(--red);animation:pulse 1s infinite}
+
+/* TABLA POSICIONES */
+.tabla-wrap{overflow:hidden;border-radius:12px;border:1px solid var(--border)}
+table.standings{width:100%;border-collapse:collapse;font-size:12px}
+table.standings th{background:var(--surface2);color:var(--muted);font-weight:800;font-size:10px;letter-spacing:.8px;padding:10px 8px;text-align:center}
+table.standings th:nth-child(2){text-align:left;padding-left:12px}
+table.standings td{padding:11px 8px;text-align:center;border-bottom:1px solid var(--border)}
+table.standings td:nth-child(2){text-align:left;padding-left:12px;font-weight:700}
+.row-even td{background:#fff}
+.row-odd td{background:var(--surface2)}
+.rank{font-weight:900;font-size:12px;color:var(--muted)}
+.rank.top3{color:var(--primary)}
+.pts-cell{font-size:15px;font-weight:900;color:var(--primary)}
+.team-cell{max-width:120px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+
+/* MAYOR ANOTADOR */
+.ma-card{
+  background:#fff;border:1px solid #FEF3C7;border-radius:var(--radius);
+  padding:16px;display:flex;align-items:center;gap:14px;
+  box-shadow:0 2px 12px rgba(245,158,11,.08);
+}
+.ma-trophy{
+  width:52px;height:52px;border-radius:14px;background:#FFFBEB;
+  display:flex;align-items:center;justify-content:center;font-size:26px;
+  border:1px solid #FDE68A;flex-shrink:0;
+}
+.ma-info{flex:1}
+.ma-name{font-size:16px;font-weight:800;color:var(--text)}
+.ma-team{font-size:11px;color:var(--sub);margin-top:2px}
+.ma-badge{
+  display:inline-block;margin-top:6px;padding:3px 10px;border-radius:8px;
+  background:#FFF7ED;border:1px solid #FED7AA;font-size:11px;font-weight:800;color:#EA580C;
+}
+.ma-pts-box{text-align:center}
+.ma-pts-num{font-size:30px;font-weight:900;color:var(--amber);display:block}
+.ma-pts-label{font-size:9px;font-weight:800;color:var(--muted);letter-spacing:1px}
+
+/* ═══════════════════════════ STATS MODAL ═══════════════════════════ */
+.modal-overlay{
+  display:none;position:fixed;inset:0;background:rgba(15,23,42,.6);
+  z-index:1000;align-items:center;justify-content:center;
+}
+.modal-overlay.active{display:flex}
+.modal-box{
+  background:#fff;border-radius:24px;width:560px;max-height:85vh;
+  overflow:hidden;display:flex;flex-direction:column;box-shadow:var(--shadow-lg);
+}
+.modal-header{
+  padding:20px 24px;border-bottom:1px solid var(--border);
+  display:flex;align-items:center;justify-content:space-between;
+}
+.modal-title{font-size:18px;font-weight:900}
+.modal-close{background:none;border:none;font-size:24px;cursor:pointer;color:var(--red);line-height:1}
+.modal-body{overflow-y:auto;padding:24px;flex:1}
+
+.stats-header-card{
+  display:flex;align-items:center;justify-content:space-between;
+  background:var(--surface2);border-radius:16px;padding:20px;margin-bottom:12px;
+}
+.stats-team{flex:1;text-align:center;font-size:14px;font-weight:800}
+.stats-score{font-size:36px;font-weight:900;color:var(--primary);padding:0 16px}
+.stats-disc-badge{
+  text-align:center;font-size:10px;font-weight:800;letter-spacing:1px;
+  color:var(--muted);margin-bottom:16px;
+}
+.stats-rows{display:flex;flex-direction:column;gap:6px;margin-bottom:16px}
+.stat-row{
+  display:flex;align-items:center;background:var(--surface2);
+  border-radius:10px;padding:10px 14px;
+}
+.stat-val{font-size:15px;font-weight:800;color:var(--text);width:40px;text-align:center}
+.stat-label{flex:1;text-align:center;font-size:10px;font-weight:800;color:var(--muted);letter-spacing:.8px}
+.timeline-title{font-size:13px;font-weight:800;color:var(--text);margin-bottom:10px}
+.timeline-list{display:flex;flex-direction:column;gap:8px}
+.timeline-event{
+  display:flex;align-items:center;gap:12px;background:var(--surface2);
+  border-radius:12px;padding:12px 14px;border-left:4px solid var(--primary);
+}
+.tl-min{
+  width:36px;height:36px;background:#fff;border-radius:10px;
+  display:flex;align-items:center;justify-content:center;
+  font-size:12px;font-weight:900;color:var(--primary);box-shadow:var(--shadow);flex-shrink:0;
+}
+.tl-equipo{font-size:13px;font-weight:800;color:var(--text)}
+.tl-tipo{font-size:11px;font-weight:600;color:var(--sub);margin-top:1px}
+
+/* ═══════════════════════════ NÓMINA ═══════════════════════════ */
+.nomina-ano{margin-bottom:28px}
+.nomina-ano-title{font-size:15px;font-weight:800;color:var(--primary);margin-bottom:12px;padding-bottom:6px;border-bottom:2px solid var(--border)}
+.nomina-grupo{background:#fff;border:1px solid var(--border);border-radius:var(--radius);overflow:hidden;margin-bottom:12px}
+.nomina-grupo-header{
+  background:var(--surface2);padding:12px 16px;font-size:12px;font-weight:700;
+  color:var(--text);display:flex;align-items:center;justify-content:space-between;
+}
+.nomina-count{color:var(--sub);font-size:11px;font-weight:600}
+.nomina-table{width:100%;border-collapse:collapse;font-size:12px}
+.nomina-table th{background:var(--bg);color:var(--muted);font-size:10px;font-weight:800;letter-spacing:.6px;padding:8px 12px;text-align:left}
+.nomina-table td{padding:9px 12px;border-bottom:1px solid var(--border)}
+.nomina-table tr:last-child td{border-bottom:none}
+.pts-small{font-weight:700;color:var(--primary)}
+
+/* ═══════════════════════════ ADMIN ═══════════════════════════ */
+.admin-tabs{display:flex;gap:4px;margin-bottom:20px;background:var(--surface);border-radius:12px;padding:4px;border:1px solid var(--border);width:fit-content}
+.admin-tab{
+  padding:8px 20px;border-radius:9px;border:none;background:none;
+  font-size:12px;font-weight:700;color:var(--sub);cursor:pointer;transition:all .15s;
+}
+.admin-tab.active{background:var(--primary);color:#fff;box-shadow:0 2px 8px rgba(2,132,199,.3)}
+.admin-tab-content{display:none}
+.admin-tab-content.active{display:block}
+
+.admin-form{display:grid;grid-template-columns:1fr 1fr;gap:14px;max-width:700px}
+.admin-form .span-2{grid-column:span 2}
+.form-group label{display:block;font-size:10px;font-weight:700;color:var(--sub);text-transform:uppercase;letter-spacing:.6px;margin-bottom:5px}
+.form-group select,.form-group input{
+  width:100%;padding:10px 12px;border:1.5px solid var(--border);border-radius:10px;
+  font-size:13px;color:var(--text);background:#fff;outline:none;transition:border .15s;
+}
+.form-group select:focus,.form-group input:focus{border-color:var(--primary)}
+.btn-admin{
+  padding:12px 24px;border:none;border-radius:11px;font-size:13px;font-weight:800;
+  cursor:pointer;transition:all .15s;
+}
+.btn-admin.primary{background:var(--primary);color:#fff;box-shadow:0 2px 8px rgba(2,132,199,.25)}
+.btn-admin.primary:hover{background:var(--primary-dark)}
+.btn-admin:disabled{opacity:.6;cursor:not-allowed}
+
+.admin-match-card{
+  background:#fff;border:1px solid var(--border);border-radius:12px;
+  padding:14px 16px;margin-bottom:10px;
+}
+.amc-header{display:flex;align-items:center;justify-content:space-between;margin-bottom:6px}
+.amc-disc{font-size:10px;font-weight:800;color:var(--sub);letter-spacing:1px}
+.amc-estado{font-size:10px;font-weight:800;padding:2px 8px;border-radius:20px}
+.amc-estado.live{background:#FEF2F2;color:var(--red)}
+.amc-estado.fin{background:#F0FDF4;color:var(--green)}
+.amc-estado.prog{background:#EFF6FF;color:var(--primary)}
+.amc-teams{font-size:14px;font-weight:700;color:var(--text);margin-bottom:4px}
+.amc-meta{font-size:11px;color:var(--sub);margin-bottom:10px}
+.amc-actions{display:flex;gap:6px;flex-wrap:wrap}
+.amc-btn{padding:6px 14px;border:none;border-radius:8px;font-size:11px;font-weight:700;cursor:pointer;transition:all .12s}
+.amc-btn.start{background:#DCFCE7;color:#166534}
+.amc-btn.start:hover{background:#BBF7D0}
+.amc-btn.finish{background:#FEE2E2;color:#991B1B}
+.amc-btn.finish:hover{background:#FECACA}
+.amc-btn.stats{background:#EFF6FF;color:var(--primary-dark)}
+.amc-btn.stats:hover{background:#DBEAFE}
+.amc-btn.danger{background:#F8FAFC;color:var(--muted)}
+.amc-btn.danger:hover{background:#FEE2E2;color:var(--red)}
+
+.divider{height:1px;background:var(--border);margin:28px 0}
+.section-subtitle{font-size:15px;font-weight:800;color:var(--text);margin-bottom:16px}
+.team-picker{display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-bottom:4px}
+.team-picker-label{font-size:11px;font-weight:800;color:var(--primary);margin-bottom:8px;text-transform:uppercase;letter-spacing:.5px}
+
+/* ═══════════════════════════ MISC ═══════════════════════════ */
+.no-data{color:var(--muted);text-align:center;padding:20px;font-style:italic;font-size:13px}
+.page-title{font-size:20px;font-weight:900;color:var(--text);margin-bottom:20px}
+.section-gap{margin-top:24px}
+
+/* TOAST */
+#toast-container{position:fixed;bottom:24px;right:24px;z-index:9999;display:flex;flex-direction:column;gap:8px}
+.toast{
+  padding:12px 18px;border-radius:12px;font-size:13px;font-weight:700;
+  box-shadow:0 4px 20px rgba(0,0,0,.15);opacity:0;transform:translateY(10px);
+  transition:all .3s;min-width:220px;
+}
+.toast.show{opacity:1;transform:translateY(0)}
+.toast.success{background:#0F172A;color:#4ADE80;border-left:4px solid #4ADE80}
+.toast.error{background:#0F172A;color:#F87171;border-left:4px solid #F87171}
+
+/* ═══ REGISTER SCREEN ═══ */
+#screen-register{
+  background:#FFFFFF;
+  align-items:center;justify-content:center;overflow-y:auto;padding:30px 0;
+}
+.reg-card{
+  background:#FFFFFF;border:1px solid var(--border);border-radius:24px;
+  padding:40px 36px;width:440px;max-width:95vw;
+  box-shadow:0 16px 48px rgba(2,132,199,.12);
+}
+.reg-title{color:var(--primary);font-size:22px;font-weight:900;letter-spacing:1px;text-align:center;margin-bottom:28px}
+.reg-field{margin-bottom:16px}
+.reg-label{color:var(--sub);font-size:10px;font-weight:700;
+  text-transform:uppercase;letter-spacing:.8px;margin-bottom:6px;display:block}
+.reg-input{
+  width:100%;background:var(--surface2);border:1.5px solid var(--border);
+  border-radius:10px;color:var(--text);padding:12px 14px;font-size:14px;outline:none;
+  transition:border .2s,box-shadow .2s;
+  box-shadow:0 1px 3px rgba(15,23,42,.04) inset;
+}
+.reg-input:focus{border-color:var(--primary);box-shadow:0 0 0 3px rgba(2,132,199,.12)}
+.reg-input::placeholder{color:var(--muted)}
+.reg-cedula-row{display:flex;gap:8px;align-items:flex-start}
+.reg-tipo-wrap{display:flex;flex-direction:column;gap:4px;flex-shrink:0}
+.reg-tipo-btn{
+  padding:10px 14px;border-radius:9px;border:1.5px solid var(--border);
+  background:var(--surface2);color:var(--sub);
+  font-weight:800;font-size:13px;cursor:pointer;transition:all .15s;white-space:nowrap;
+  box-shadow:0 1px 3px rgba(15,23,42,.04);
+}
+.reg-tipo-btn.active{background:var(--primary);border-color:var(--primary);color:#fff;box-shadow:0 2px 8px rgba(2,132,199,.25)}
+.reg-tipo-btn:hover:not(.active){background:#E0F2FE}
+.reg-cedula-input{flex:1}
+.reg-hint{color:var(--muted);font-size:11px;margin-top:4px}
+.btn-reg-submit{
+  width:100%;padding:14px;border:none;border-radius:12px;margin-top:8px;
+  background:var(--primary);color:#fff;font-weight:900;font-size:15px;
+  letter-spacing:.5px;cursor:pointer;transition:background .15s,transform .1s;
+  box-shadow:0 4px 16px rgba(2,132,199,.25);
+}
+.btn-reg-submit:hover{background:var(--primary-dark)}
+.btn-reg-submit:active{transform:scale(.98)}
+.btn-reg-submit:disabled{opacity:.6;cursor:not-allowed}
+.reg-back{
+  background:none;border:none;color:var(--sub);
+  font-size:13px;cursor:pointer;margin-top:16px;display:block;width:100%;text-align:center;
+  padding:6px;border-radius:8px;transition:background .15s;
+}
+.reg-back:hover{background:#E0F2FE;color:var(--primary)}
+
+/* Scrollbar */
+::-webkit-scrollbar{width:6px}
+::-webkit-scrollbar-track{background:transparent}
+::-webkit-scrollbar-thumb{background:var(--border);border-radius:4px}
+
+/* ═══════════════════════════ RESPONSIVE ═══════════════════════════ */
+
+/* ── TABLET (≤ 1024px): sidebar más angosta, grids a 1 columna ── */
+@media (max-width:1024px){
+  :root{--sidebar:220px}
+  .nav-item{padding:12px 14px;gap:8px;font-size:12px}
+  .nav-label{padding:8px 14px 4px}
+  .grid-3{grid-template-columns:1fr 1fr}
+  .col-span-2{grid-column:span 1}
+}
+
+/* ── MÓVIL (≤ 768px): sidebar pasa a ser drawer deslizable ── */
+@media (max-width:768px){
+
+  /* Sidebar: oculto fuera de pantalla, se desliza al abrir */
+  .sidebar{
+    position:fixed;top:0;left:0;height:100vh;width:78vw;max-width:300px;
+    transform:translateX(-100%);
+    transition:transform .25s ease;
+    z-index:200;
+  }
+  .sidebar.open{transform:translateX(0)}
+  .sidebar-close-btn{
+    display:flex;align-items:center;justify-content:center;
+    position:absolute;top:14px;right:14px;width:32px;height:32px;
+    background:rgba(255,255,255,.15);border:none;border-radius:8px;
+    color:#fff;font-size:16px;cursor:pointer;z-index:5;
+  }
+
+  /* Overlay oscuro detrás del sidebar abierto */
+  .sidebar-overlay{
+    display:none;position:fixed;inset:0;background:rgba(15,23,42,.5);
+    z-index:150;
+  }
+  .sidebar-overlay.active{display:block}
+
+  /* Botón hamburguesa visible solo en móvil */
+  .hamburger-btn{
+    display:flex;flex-direction:column;justify-content:center;gap:4px;
+    width:34px;height:34px;border:none;background:none;cursor:pointer;
+    flex-shrink:0;padding:0;
+  }
+  .hamburger-btn span{
+    display:block;width:22px;height:2.5px;background:var(--text);border-radius:2px;
+  }
+
+  /* Topbar: stack vertical, evita que todo se amontone en una fila */
+  .topbar{
+    height:auto;min-height:var(--header);
+    flex-wrap:wrap;padding:10px 14px;gap:10px;
+  }
+  .topbar-title{font-size:15px;flex:1 1 auto;min-width:0}
+  .disc-pills{
+    width:100%;order:3;
+    overflow-x:auto;-webkit-overflow-scrolling:touch;
+    padding-bottom:2px;
+  }
+  .disc-pill{padding:6px 12px;font-size:11px;white-space:nowrap;flex-shrink:0}
+
+  /* Contenido: menos padding lateral */
+  .content{padding:16px 14px}
+
+  /* Grids: todo a 1 columna en móvil */
+  .grid-2,.grid-3{grid-template-columns:1fr;gap:14px}
+  .col-span-2{grid-column:span 1}
+
+  /* Cards más compactas */
+  .card{padding:14px}
+  .page-title{font-size:17px}
+
+  /* Match cards: evita que nombre de equipo + score se desborden */
+  .match-row{flex-wrap:wrap;gap:6px}
+  .team-name{font-size:12px}
+  .score{font-size:18px}
+
+  /* Tabla de posiciones: scroll horizontal en vez de comprimirse */
+  .tabla-wrap{overflow-x:auto}
+  table.standings{min-width:560px}
+
+  /* Mayor anotador: columna en vez de fila */
+  .ma-card{flex-wrap:wrap}
+  .ma-pts-box{width:100%;text-align:left;display:flex;align-items:center;gap:8px;margin-top:4px}
+
+  /* Modal de estadísticas: ocupa casi todo el ancho */
+  .modal-box{width:94vw;max-height:90vh}
+  .stats-team{font-size:12px}
+  .stats-score{font-size:28px;padding:0 10px}
+
+  /* Admin: formularios y team-picker a 1 columna */
+  .admin-form{grid-template-columns:1fr;max-width:100%}
+  .admin-form .span-2{grid-column:span 1}
+  .team-picker{grid-template-columns:1fr;gap:18px}
+  .team-picker-label{white-space:normal;line-height:1.3}
+  .admin-tabs{
+    width:100%;max-width:100%;overflow-x:auto;
+    -webkit-overflow-scrolling:touch;
+    flex-wrap:nowrap;
+  }
+  .admin-tab{flex-shrink:0;white-space:nowrap;padding:8px 14px;font-size:11px}
+  .admin-match-card{padding:12px}
+  .amc-teams{font-size:13px}
+  .amc-actions{gap:6px}
+  .amc-btn{padding:6px 10px;font-size:10px}
+
+  /* Auth cards (login/registro/recuperar): ancho fluido */
+  .auth-card{width:92vw;padding:32px 22px}
+  .reg-card{width:92vw;padding:28px 20px}
+  .reg-cedula-row{flex-wrap:wrap}
+  .reg-tipo-wrap{flex-direction:row;width:100%}
+  .reg-tipo-btn{flex:1}
+
+  /* Cuadritos del código de recuperación: que no se encimen */
+  .recover-value{font-size:18px}
+}
+
+/* ── MÓVIL CHICO (≤ 400px): ajustes finales ── */
+@media (max-width:400px){
+  .auth-title{font-size:22px}
+  .auth-card{padding:26px 16px}
+  .field-row{gap:6px}
+  .auth-select{width:60px}
+  .topbar-title{font-size:13px}
+  .sidebar{width:84vw}
+}
+</style>
+</head>
+<body>
+
+<!-- ═══════════════════ LOGIN ═══════════════════ -->
+<div id="screen-login" class="screen">
+  <div class="auth-card">
+    <div class="auth-logo">
+      <div class="auth-logo-circle">
+        <img src="https://blogger.googleusercontent.com/img/b/R29vZ2xl/AVvXsEj5yrnVHe7Gz22KcG6PxEzmNmsythIE_Db-t3SgWjgcy3fbY52NE5aapHu1vmp4MXfrpsqi1G5igOxLHq289c3vSHmXmHFtXKB1EiAdEDegcakac55eEmx7UllCug4umw/s220/Liceo.jpg" alt="Logo Liceo" style="width: 100%; height: 100%; border-radius: 50%; object-fit: cover;" />
+      </div>
+      <span class="auth-school">E.T. "José Ricardo Guillén Suárez"</span>
+      <span class="auth-title">Intercursos</span>
+    </div>
+    <p class="auth-subtitle">Inicia sesión con tu cédula y contraseña</p>
+
+    <div class="field-label">Tipo y Nº de Cédula</div>
+    <div class="field-row">
+      <select id="login-tipo" class="auth-select">
+        <option value="V">V</option>
+        <option value="E">E</option>
+      </select>
+      <input id="login-cedula" class="auth-input" style="margin:0;flex:1" type="text" inputmode="numeric" placeholder="Número de cédula" maxlength="9"/>
+    </div>
+    <input id="login-pass" class="auth-input" type="password" placeholder="Contraseña" maxlength="16"/>
+    <button id="btn-login" class="btn-primary">ACCEDER</button>
+    <div class="auth-links">
+      <button class="auth-link" id="btn-go-register">¿No tienes cuenta? <b>CREAR CUENTA</b></button>
+      <button class="auth-link" id="btn-recover">¿Olvidaste tus datos? <b>RECUPERAR</b></button>
+    </div>
+  </div>
+</div>
+
+<!-- ═══════════════════ REGISTER ═══════════════════ -->
+<div id="screen-register" class="screen">
+  <div class="reg-card">
+    <div class="auth-logo" style="margin-bottom:20px">
+      <div class="auth-logo-circle">
+        <img src="https://blogger.googleusercontent.com/img/b/R29vZ2xl/AVvXsEj5yrnVHe7Gz22KcG6PxEzmNmsythIE_Db-t3SgWjgcy3fbY52NE5aapHu1vmp4MXfrpsqi1G5igOxLHq289c3vSHmXmHFtXKB1EiAdEDegcakac55eEmx7UllCug4umw/s220/Liceo.jpg" alt="Logo" style="width:100%;height:100%;border-radius:50%;object-fit:cover"/>
+      </div>
+      <span class="auth-school">E.T. "José Ricardo Guillén Suárez"</span>
+    </div>
+    <div class="reg-title">CREAR CUENTA</div>
+
+    <div class="reg-field">
+      <label class="reg-label">Nombres</label>
+      <input id="reg-nombre" class="reg-input" type="text" placeholder="Ej: JUAN CARLOS" maxlength="35" autocomplete="off"/>
+    </div>
+
+    <div class="reg-field">
+      <label class="reg-label">Apellidos</label>
+      <input id="reg-apellido" class="reg-input" type="text" placeholder="Ej: PÉREZ GARCÍA" maxlength="35" autocomplete="off"/>
+    </div>
+
+    <div class="reg-field">
+      <label class="reg-label">Tipo y Nº de Cédula</label>
+      <div class="reg-cedula-row">
+        <div class="reg-tipo-wrap">
+          <button class="reg-tipo-btn active" data-tipo="V">V — Venezolano</button>
+          <button class="reg-tipo-btn" data-tipo="E">E — Extranjero</button>
+        </div>
+        <div class="reg-cedula-input">
+          <input id="reg-cedula" class="reg-input" type="text" inputmode="numeric" placeholder="7 u 8 dígitos" maxlength="8" autocomplete="off"/>
+          <div class="reg-hint">Solo números, sin puntos ni comas</div>
+        </div>
+      </div>
+    </div>
+
+    <div class="reg-field">
+      <label class="reg-label">Correo de recuperación</label>
+      <input id="reg-email" class="reg-input" type="email" placeholder="usuario@gmail.com" autocomplete="off"/>
+    </div>
+
+    <div class="reg-field">
+      <label class="reg-label">Contraseña (8-16 caracteres)</label>
+      <input id="reg-pass" class="reg-input" type="password" placeholder="Solo letras, números y puntos" maxlength="16" autocomplete="new-password"/>
+      <div class="reg-hint">Sin ?, :, ni espacios · No solo números</div>
+    </div>
+
+    <div class="reg-field">
+      <label class="reg-label">Confirmar contraseña</label>
+      <input id="reg-pass-confirm" class="reg-input" type="password" placeholder="Repite tu contraseña" maxlength="16" autocomplete="new-password"/>
+    </div>
+
+    <button id="btn-create-account" class="btn-reg-submit">CREAR CUENTA</button>
+    <button id="btn-back-from-register" class="reg-back">← Volver al inicio de sesión</button>
+  </div>
+</div>
+
+<!-- ═══════════════════ RECOVER ═══════════════════ -->
+<div id="screen-recover" class="screen">
+  <div class="auth-card">
+    <div class="auth-logo">
+      <div class="auth-logo-circle">🔑</div>
+      <span class="auth-title">Recuperar Acceso</span>
+    </div>
+
+    <div id="recover-step-1" class="recover-step active">
+      <p class="auth-subtitle">Te enviaremos un código de 6 dígitos a tu Gmail</p>
+      <input id="recover-email" class="auth-input" type="email" placeholder="Tu correo registrado"/>
+      <button id="btn-send-code" class="btn-primary">ENVIAR CÓDIGO</button>
+    </div>
+
+    <div id="recover-step-2" class="recover-step">
+      <p class="auth-subtitle">Ingresa el código de 6 dígitos que recibiste</p>
+      <input id="recover-code" class="auth-input" type="text" inputmode="numeric" maxlength="6" placeholder="000000" style="text-align:center;font-size:24px;letter-spacing:8px"/>
+      <button id="btn-verify-code" class="btn-primary">VERIFICAR CÓDIGO</button>
+    </div>
+
+    <div id="recover-step-3" class="recover-step">
+      <p class="auth-subtitle">¡Hola, <strong id="rec-username"></strong>! Aquí están tus datos:</p>
+      <div class="recover-result-box">
+        <div class="recover-label">Tu cédula (usuario)</div>
+        <div class="recover-value" id="rec-cedula"></div>
+        <div class="recover-label">Tu contraseña</div>
+        <div class="recover-value" id="rec-pass"></div>
+      </div>
+      <button class="btn-primary" onclick="showScreen('login');recoverStep(1)">IR AL LOGIN</button>
+    </div>
+
+    <div class="auth-links" style="margin-top:16px">
+      <button class="auth-link" id="btn-back-login">← Volver al login</button>
+    </div>
+    <button id="btn-back-recover" style="display:none"></button>
+  </div>
+</div>
+
+<!-- ═══════════════════ DASHBOARD ═══════════════════ -->
+<div id="screen-dashboard" class="screen">
+
+  <!-- SIDEBAR -->
+<aside class="sidebar" id="sidebar">
+    <button class="sidebar-close-btn" id="sidebar-close-btn" aria-label="Cerrar menú">✕</button>
+    <div class="sidebar-brand">
+      <div class="sidebar-icon">
+        <img src="https://blogger.googleusercontent.com/img/b/R29vZ2xl/AVvXsEj5yrnVHe7Gz22KcG6PxEzmNmsythIE_Db-t3SgWjgcy3fbY52NE5aapHu1vmp4MXfrpsqi1G5igOxLHq289c3vSHmXmHFtXKB1EiAdEDegcakac55eEmx7UllCug4umw/s220/Liceo.jpg" alt="Logo Liceo" style="width: 100%; height: 100%; border-radius: 50%; object-fit: cover;" />
+      </div>
+      <div class="sidebar-brand-text">
+        <b>Intercursos JRG</b>
+        <span>Sistema Web</span>
+      </div>
+    </div>
+
+    <nav class="nav-group">
+      <div class="nav-label">MENÚ</div>
+      <button class="nav-item" data-section="inicio">
+        <span class="nav-icon">🏠</span> Inicio
+      </button>
+      <button class="nav-item" data-section="nomina">
+        <span class="nav-icon">👥</span> Nóminas
+      </button>
+    </nav>
+
+    <nav class="nav-group" id="nav-admin" style="display:none">
+      <div class="nav-label">Gestión</div>
+      <button class="nav-item" data-section="admin">
+        <span class="nav-icon">⚙️</span> Panel Admin
+      </button>
+    </nav>
+
+    <nav class="nav-group" id="nav-roles" style="display:none">
+      <div class="nav-label">SISTEMA</div>
+      <button class="nav-item" data-section="roles">
+        <span class="nav-icon">🛡️</span> Gestionar Roles
+      </button>
+    </nav>
+
+    <nav class="nav-group">
+      <div class="nav-label">SOPORTE</div>
+      <button class="nav-item" id="btn-abrir-manual" onclick="abrirManual()">
+        <span class="nav-icon">❓</span> Ayuda / Manual
+      </button>
+    </nav>
+
+    <div class="sidebar-footer">
+      <div class="user-card">
+        <div class="user-avatar" id="user-avatar">U</div>
+        <div class="user-info">
+          <b id="header-name">—</b>
+          <span id="header-cedula">—</span>
+        </div>
+      </div>
+      <button class="btn-logout" id="btn-logout">⬅ Cerrar Sesión</button>
+    </div>
+  </aside>
+
+  <!-- OVERLAY (solo móvil, detrás del sidebar abierto) -->
+  <div class="sidebar-overlay" id="sidebar-overlay"></div>
+
+
+  <!-- MAIN -->
+  <div class="main-area">
+    <div class="topbar">
+      <button class="hamburger-btn" id="hamburger-btn" aria-label="Abrir menú">
+        <span></span><span></span><span></span>
+      </button>
+      <span class="topbar-title" id="topbar-title">Dashboard</span>
+      <div class="disc-pills">
+        <button class="disc-pill active" data-disc="Fútbol">⚽ Fútbol</button>
+        <button class="disc-pill" data-disc="Basket">🏀 Basket</button>
+        <button class="disc-pill" data-disc="Voleibol">🏐 Voleibol</button>
+      </div>
+    </div>
+
+    <div class="content">
+
+      <!-- ── INICIO ── -->
+      <div id="page-inicio" class="section-page">
+        <div class="grid-2">
+
+          <!-- EN VIVO -->
+          <div class="card">
+            <div class="card-header">
+              <span class="card-title">🔴 En Vivo</span>
+              <span class="card-badge" id="live-badge" style="display:none">0</span>
+            </div>
+            <div id="live-container"><p class="no-data">Cargando…</p></div>
+          </div>
+
+          <!-- PRÓXIMOS -->
+          <div class="card">
+            <div class="card-header"><span class="card-title">📅 Próximos Partidos</span></div>
+            <div id="prox-container"><p class="no-data">Cargando…</p></div>
+          </div>
+
+          <!-- MAYOR ANOTADOR -->
+          <div id="mayor-anotador" class="card" style="display:none">
+            <div class="card-header"><span class="card-title">⭐ Mayor Anotador</span></div>
+            <div class="ma-card">
+              <div class="ma-trophy">🏆</div>
+              <div class="ma-info">
+                <div class="ma-name" id="ma-name">—</div>
+                <div class="ma-team" id="ma-team">—</div>
+                <div class="ma-badge" id="ma-badge">—</div>
+              </div>
+              <div class="ma-pts-box">
+                <span class="ma-pts-num" id="ma-pts">0</span>
+                <span class="ma-pts-label">PTS</span>
+              </div>
+            </div>
+          </div>
+
+          <!-- RESULTADOS -->
+          <div class="card">
+            <div class="card-header"><span class="card-title">✅ Resultados</span></div>
+            <div id="result-container"><p class="no-data">Cargando…</p></div>
+          </div>
+
+        </div>
+
+        <!-- TABLA POSICIONES -->
+        <div class="card section-gap">
+          <div class="card-header"><span class="card-title">📊 Tabla de Posiciones</span></div>
+          <div class="tabla-wrap">
+            <table class="standings">
+              <thead>
+                <tr>
+                  <th>#</th><th style="text-align:left">EQUIPO</th>
+                  <th>PJ</th><th>PG</th>
+                  <th id="th-pe">PE</th>
+                  <th>PP</th><th>GF</th><th>GC</th><th>DG</th><th>PTS</th>
+                </tr>
+              </thead>
+              <tbody id="tabla-posiciones">
+                <tr><td colspan="10" class="no-data">Cargando…</td></tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+
+      <!-- ── NÓMINA ── -->
+      <div id="page-nomina" class="section-page">
+        <h1 class="page-title">👥 Nóminas — <span id="nomina-disc-title">Fútbol</span></h1>
+        <div id="nomina-container"><p class="no-data">Selecciona una disciplina para ver la nómina</p></div>
+      </div>
+
+      <!-- ── ROLES (solo admin) ── -->
+      <div id="page-roles" class="section-page">
+        <h1 class="page-title">🛡️ Gestionar Roles</h1>
+        <div class="card" style="max-width:520px">
+          <div class="card-header"><span class="card-title">Asignar / Revocar rol de Árbitro</span></div>
+          <div style="padding:20px;display:flex;flex-direction:column;gap:14px">
+            <p style="font-size:13px;color:#64748B;margin:0">Ingresa la cédula del usuario (con prefijo V o E) para buscar su cuenta y cambiar su rol.</p>
+            <div style="display:flex;gap:10px">
+              <input id="roles-cedula" type="text" placeholder="Ej: V12345678" maxlength="10"
+                style="flex:1;padding:10px 14px;border:1.5px solid #E2E8F0;border-radius:10px;font-size:14px;outline:none"/>
+              <button onclick="buscarUsuarioRol()"
+                style="padding:10px 18px;background:#0284C7;color:white;border:none;border-radius:10px;font-weight:700;cursor:pointer;font-size:14px">
+                🔍 Buscar
+              </button>
+            </div>
+
+            <!-- resultado de búsqueda -->
+            <div id="roles-result" style="display:none;background:#F8FAFC;border:1px solid #E2E8F0;border-radius:12px;padding:16px">
+              <div style="display:flex;align-items:center;gap:12px;margin-bottom:14px">
+                <div style="width:42px;height:42px;border-radius:50%;background:#0284C7;color:white;display:flex;align-items:center;justify-content:center;font-weight:900;font-size:18px" id="roles-avatar">U</div>
+                <div>
+                  <div style="font-weight:800;font-size:15px;color:#1E293B" id="roles-nombre">—</div>
+                  <div style="font-size:12px;color:#64748B" id="roles-cedula-display">—</div>
+                </div>
+                <div style="margin-left:auto">
+                  <span id="roles-badge" style="padding:4px 12px;border-radius:20px;font-size:11px;font-weight:800">—</span>
+                </div>
+              </div>
+              <div style="display:flex;gap:10px" id="roles-btns">
+                <button id="btn-dar-arbitro" onclick="cambiarRol('arbitro')"
+                  style="flex:1;padding:11px;background:#10B981;color:white;border:none;border-radius:10px;font-weight:700;cursor:pointer;font-size:13px">
+                  ✅ Dar rol de Árbitro
+                </button>
+                <button id="btn-quitar-rol" onclick="cambiarRol('usuario')"
+                  style="flex:1;padding:11px;background:#64748B;color:white;border:none;border-radius:10px;font-weight:700;cursor:pointer;font-size:13px">
+                  🔄 Revertir a Usuario
+                </button>
+              </div>
+            </div>
+
+            <p style="font-size:11px;color:#94A3B8;margin:0">
+              ⚠️ No es posible asignar el rol de Administrador desde esta pantalla.<br>
+              El único administrador global es <b>V10000000</b>.
+            </p>
+          </div>
+        </div>
+      </div>
+
+      <!-- ── ADMIN ── -->
+      <div id="page-admin" class="section-page">
+        <h1 class="page-title">⚙️ Panel Administrativo</h1>
+
+        <div class="admin-tabs">
+          <button class="admin-tab active" data-tab="partidos">Partidos</button>
+          <button class="admin-tab" data-tab="nuevo">Nuevo Partido</button>
+          <button class="admin-tab" data-tab="estudiante">Agregar Estudiante</button>
+        </div>
+
+        <!-- TAB: PARTIDOS -->
+        <div class="admin-tab-content active" id="atab-partidos">
+          <div class="section-subtitle">Todos los Partidos</div>
+          <div id="admin-partidos-list"><p class="no-data">Cargando…</p></div>
+        </div>
+
+        <!-- TAB: NUEVO PARTIDO -->
+        <div class="admin-tab-content" id="atab-nuevo">
+          <div class="section-subtitle">Programar Nuevo Partido</div>
+          <div class="admin-form">
+            <div class="form-group span-2">
+              <label>Disciplina</label>
+              <select id="np-disc">
+                <option>Fútbol</option><option>Basket</option><option>Voleibol</option>
+              </select>
+            </div>
+
+            <div style="grid-column:span 2">
+              <div class="team-picker">
+                <div>
+                  <div class="team-picker-label">🏠 Equipo Local</div>
+                  <div class="form-group"><label>Año</label>
+                    <select id="np-ano1">
+                      <option>1er Año</option><option>2do Año</option><option>3er Año</option><option>4to Año</option><option>5to Año</option>
+                    </select></div>
+                  <div class="form-group"><label>Mención</label>
+                    <select id="np-men1">
+                      <option>Telemática</option><option>Administración</option><option>Contabilidad</option><option>Turismo</option>
+                    </select></div>
+                  <div class="form-group"><label>Sección</label>
+                    <select id="np-sec1"><option>A</option><option>B</option><option>U</option></select></div>
+                </div>
+                <div>
+                  <div class="team-picker-label">✈️ Equipo Visita</div>
+                  <div class="form-group"><label>Año</label>
+                    <select id="np-ano2">
+                      <option>1er Año</option><option>2do Año</option><option>3er Año</option><option>4to Año</option><option>5to Año</option>
+                    </select></div>
+                  <div class="form-group"><label>Mención</label>
+                    <select id="np-men2">
+                      <option>Telemática</option><option>Administración</option><option>Contabilidad</option><option>Turismo</option>
+                    </select></div>
+                  <div class="form-group"><label>Sección</label>
+                    <select id="np-sec2"><option>A</option><option>B</option><option>U</option></select></div>
+                </div>
+              </div>
+            </div>
+
+            <div class="form-group">
+              <label>Cancha</label>
+              <select id="np-cancha"><option>Cancha 1</option><option>Cancha 2</option></select>
+            </div>
+            <div class="form-group">
+              <label>Fecha</label>
+              <input id="np-fecha" type="date"/>
+              <div class="reg-hint">Solo días de lunes a viernes</div>
+            </div>
+            <div class="form-group">
+              <label>Hora</label>
+              <input id="np-hora" type="time" min="07:00" max="18:00"/>
+              <div class="reg-hint">Entre 7:00 am y 6:00 pm</div>
+            </div>
+            <div class="span-2">
+              <button id="btn-publish-match" class="btn-admin primary">📅 PUBLICAR PARTIDO</button>
+            </div>
+          </div>
+        </div>
+
+        <!-- TAB: ESTUDIANTE -->
+        <div class="admin-tab-content" id="atab-estudiante">
+          <div class="section-subtitle">Inscribir Estudiante en Nómina</div>
+          <div class="admin-form">
+            <div class="form-group">
+              <label>Nombre</label>
+              <input id="est-nombre" type="text" placeholder="Solo letras" maxlength="35" autocomplete="off"/>
+            </div>
+            <div class="form-group">
+              <label>Apellido</label>
+              <input id="est-apellido" type="text" placeholder="Solo letras" maxlength="35" autocomplete="off"/>
+            </div>
+            <div class="form-group">
+              <label>Tipo de Documento</label>
+              <select id="est-tipo"><option value="V">V — Venezolano/a</option><option value="E">E — Extranjero/a</option></select>
+            </div>
+            <div class="form-group">
+              <label>Número de Cédula</label>
+              <input id="est-cedula" type="text" inputmode="numeric" placeholder="Solo números" maxlength="9" autocomplete="off"/>
+            </div>
+            <div class="form-group">
+              <label>Año</label>
+              <select id="est-ano">
+                <option>1er Año</option><option>2do Año</option><option>3er Año</option><option>4to Año</option><option>5to Año</option>
+              </select>
+            </div>
+            <div class="form-group">
+              <label>Mención</label>
+              <select id="est-mencion">
+                <option>Telemática</option><option>Administración</option><option>Contabilidad</option><option>Turismo</option>
+              </select>
+            </div>
+            <div class="form-group">
+              <label>Sección</label>
+              <select id="est-seccion"><option>A</option><option>B</option><option>U</option></select>
+            </div>
+            <div class="form-group">
+              <label>Disciplina</label>
+              <select id="est-disc"><option>Fútbol</option><option>Basket</option><option>Voleibol</option></select>
+            </div>
+            <div class="span-2">
+              <button id="btn-register-student" class="btn-admin primary">✅ REGISTRAR ESTUDIANTE</button>
+            </div>
+          </div>
+        </div>
+
+        <!-- VACIAR SISTEMA — solo admin -->
+        <div id="admin-sistema-zone" style="display:none;margin-top:24px;border-top:1px solid #E2E8F0;padding-top:16px">
+          <p style="font-size:9px;font-weight:800;color:#94A3B8;letter-spacing:2px;text-transform:uppercase;margin-bottom:10px">HERRAMIENTAS DEL SISTEMA</p>
+          <button onclick="confirmarBorradoTotal()" style="width:100%;padding:14px;background:#FEF3C7;border:1px solid #F59E0B;border-left:4px solid #EF4444;border-radius:12px;cursor:pointer;text-align:left;display:flex;align-items:center;gap:12px">
+            <span style="font-size:22px">⚙️</span>
+            <span>
+              <div style="font-size:13px;font-weight:700;color:#374151">Reiniciar registros del torneo</div>
+              <div style="font-size:10px;color:#9CA3AF">Elimina partidos, posiciones y nómina · Los usuarios no se ven afectados</div>
+            </span>
+          </button>
+        </div>
+
+      </div><!-- /page-admin -->
+
+    </div><!-- /content -->
+  </div><!-- /main-area -->
+</div><!-- /screen-dashboard -->
+
+<!-- STATS MODAL -->
+<div id="stats-modal" class="modal-overlay">
+  <div class="modal-box">
+    <div class="modal-header">
+      <span class="modal-title">Resumen del Encuentro</span>
+      <button class="modal-close" id="stats-modal-close">✕</button>
+    </div>
+    <div class="modal-body" id="stats-modal-body"></div>
+  </div>
+</div>
+
+<!-- TOASTS -->
+<!-- ══ MODAL MANUAL DE USUARIO ══════════════════════════════════════════ -->
+<!-- ── MINI-MANUAL DE SECCIÓN ─────────────────────────────────── -->
+<div id="modal-mini-manual" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,0.6);z-index:2100;align-items:center;justify-content:center;padding:20px;">
+  <div style="background:white;border-radius:24px;width:100%;max-width:400px;overflow:hidden;box-shadow:0 20px 60px rgba(0,0,0,0.3);">
+    <!-- Header icono -->
+    <div style="padding:32px 24px 20px;display:flex;flex-direction:column;align-items:center;gap:12px">
+      <div id="mini-icon" style="width:72px;height:72px;border-radius:20px;display:flex;align-items:center;justify-content:center;font-size:36px;background:linear-gradient(135deg,#0284C7,#38BDF8);"></div>
+      <h2 id="mini-title" style="font-size:20px;font-weight:900;color:#1E293B;margin:0;text-align:center"></h2>
+      <p id="mini-desc" style="font-size:14px;color:#475569;margin:0;text-align:center;line-height:1.6"></p>
+    </div>
+    <!-- Dots -->
+    <div id="mini-dots" style="display:flex;justify-content:center;gap:6px;padding-bottom:16px"></div>
+    <!-- Botones -->
+    <div style="display:flex;align-items:center;gap:10px;padding:0 20px 24px">
+      <button id="mini-btn-prev" onclick="miniAnterior()"
+        style="padding:10px 16px;border:1.5px solid #0284C7;background:white;color:#0284C7;border-radius:12px;font-weight:700;cursor:pointer;font-size:13px">
+        ‹ Anterior
+      </button>
+      <span id="mini-counter" style="flex:1;text-align:center;font-size:12px;color:#94A3B8;font-weight:600"></span>
+      <button id="mini-btn-next" onclick="miniSiguiente()"
+        style="padding:10px 20px;background:#0284C7;color:white;border:none;border-radius:12px;font-weight:700;cursor:pointer;font-size:13px">
+        Siguiente ›
+      </button>
+    </div>
+    <div style="text-align:center;padding-bottom:16px">
+      <button onclick="cerrarMiniManual()" style="background:none;border:none;color:#94A3B8;font-size:12px;cursor:pointer">Saltar tutorial</button>
+    </div>
+  </div>
+</div>
+
+<div id="modal-manual" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,0.65);z-index:2000;align-items:center;justify-content:center;">
+  <div id="manual-box" style="background:#fff;border-radius:24px;width:min(560px,94vw);max-height:90vh;overflow:hidden;display:flex;flex-direction:column;box-shadow:0 20px 60px rgba(0,0,0,0.3);">
+
+    <!-- Header -->
+    <div id="manual-header" style="padding:20px 24px;display:flex;align-items:center;justify-content:space-between;">
+      <div>
+        <div style="color:white;font-size:18px;font-weight:900;letter-spacing:.5px">Manual de Usuario</div>
+        <div id="manual-rol-label" style="color:rgba(255,255,255,.8);font-size:12px;font-weight:600;margin-top:2px">Intercursos App</div>
+      </div>
+      <button onclick="cerrarManual()" style="width:36px;height:36px;border-radius:18px;border:none;background:rgba(255,255,255,.2);color:white;font-size:20px;cursor:pointer;display:flex;align-items:center;justify-content:center;">✕</button>
+    </div>
+
+    <!-- Slide content -->
+    <div style="flex:1;overflow:hidden;display:flex;align-items:stretch;">
+      <div id="manual-slides" style="display:flex;transition:transform .35s cubic-bezier(.4,0,.2,1);will-change:transform;"></div>
+    </div>
+
+    <!-- Dots -->
+    <div id="manual-dots" style="display:flex;justify-content:center;gap:6px;padding:14px 24px 8px;"></div>
+
+    <!-- Buttons -->
+    <div style="display:flex;align-items:center;justify-content:space-between;padding:8px 24px 16px;">
+      <button id="manual-btn-prev" onclick="manualAnterior()"
+        style="display:flex;align-items:center;gap:4px;padding:10px 16px;border-radius:12px;border:1.5px solid #0284C7;background:#EFF6FF;color:#0284C7;font-weight:800;font-size:13px;cursor:pointer;">
+        ‹ Anterior
+      </button>
+      <span id="manual-counter" style="color:#94A3B8;font-size:13px;font-weight:700;"></span>
+      <button id="manual-btn-next" onclick="manualSiguiente()"
+        style="display:flex;align-items:center;gap:6px;padding:10px 20px;border-radius:12px;border:none;background:#0284C7;color:white;font-weight:900;font-size:13px;cursor:pointer;box-shadow:0 3px 10px rgba(2,132,199,.35);">
+        Siguiente ›
+      </button>
+    </div>
+
+    <!-- Saltar -->
+    <div id="manual-saltar-wrap" style="text-align:center;padding-bottom:16px;">
+      <button onclick="cerrarManual()" style="background:none;border:none;color:#94A3B8;font-size:12px;cursor:pointer;text-decoration:underline;">
+        Saltar tutorial
+      </button>
+    </div>
+
+  </div>
+</div>
+
+<div id="toast-container"></div>
+
+<script>
+// Sync nomina disc title with pill selection
+document.querySelectorAll('.disc-pill').forEach(p=>{
+  p.addEventListener('click',()=>{
+    const nt=document.getElementById('nomina-disc-title');
+    if(nt) nt.textContent=p.dataset.disc;
+  });
+});
+// Update user avatar initial
+const origBoot = window.bootDashboard;
+document.addEventListener('DOMContentLoaded',()=>{
+  const obs=new MutationObserver(()=>{
+    const name=document.getElementById('header-name').textContent;
+    if(name&&name!=='—') document.getElementById('user-avatar').textContent=name.charAt(0).toUpperCase();
+  });
+  obs.observe(document.getElementById('header-name'),{childList:true,characterData:true,subtree:true});
+});
+// expose recoverStep for inline call
+window.recoverStep = function(n){
+  document.querySelectorAll('.recover-step').forEach(s=>s.classList.remove('active'));
+  const el=document.getElementById(`recover-step-${n}`);
+  if(el) el.classList.add('active');
+};
+window.showScreen = function(name){
+  document.querySelectorAll('.screen').forEach(s=>s.classList.remove('active'));
+  document.getElementById(`screen-${name}`).classList.add('active');
+};
+</script>
+</body>
+</html>
